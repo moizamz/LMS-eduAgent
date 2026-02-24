@@ -49,7 +49,11 @@ const InstructorPanel = () => {
 
   const handleCreateCourse = async () => {
     try {
-      await api.post('/courses/', formData);
+      // By default publish the course so students can discover it
+      await api.post('/courses/', {
+        ...formData,
+        is_published: true,
+      });
       toast.success('Course created successfully');
       setOpenDialog(false);
       setFormData({ title: '', description: '', price: '' });

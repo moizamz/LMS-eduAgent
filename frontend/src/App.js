@@ -26,9 +26,9 @@ import './App.css';
 const theme = createTheme({
   palette: {
     primary: {
-      main: '#1976d2', // Blue
-      light: '#42a5f5',
-      dark: '#1565c0',
+      main: '#8b5cf6', // Primary purple (matches dashboard)
+      light: '#a855f7',
+      dark: '#7c3aed',
     },
     secondary: {
       main: '#616161', // Grey

@@ -111,10 +111,10 @@ const Register = () => {
     '& .MuiOutlinedInput-root': {
       backgroundColor: '#ffffff',
       '&:hover .MuiOutlinedInput-notchedOutline': {
-        borderColor: '#1976d2',
+        borderColor: '#8b5cf6',
       },
       '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-        borderColor: '#1976d2',
+        borderColor: '#8b5cf6',
       },
     },
   };
@@ -349,7 +349,7 @@ const Register = () => {
                 mt: 3,
                 mb: 2,
                 py: 1.5,
-                backgroundColor: '#1976d2',
+                backgroundColor: '#8b5cf6',
                 color: '#ffffff',
                 fontSize: '1rem',
                 fontWeight: 600,
@@ -357,7 +357,7 @@ const Register = () => {
                 borderRadius: 1,
                 boxShadow: 'none',
                 '&:hover': {
-                  backgroundColor: '#1565c0',
+                  backgroundColor: '#7c3aed',
                   boxShadow: 'none',
                 },
                 '&:disabled': {
@@ -380,7 +380,7 @@ const Register = () => {
                   component={RouterLink}
                   to="/login"
                   sx={{
-                    color: '#1976d2',
+                    color: '#8b5cf6',
                     textDecoration: 'none',
                     fontWeight: 600,
                     '&:hover': {

@@ -44,13 +44,35 @@ class RegisterView(generics.CreateAPIView):
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def login_view(request):
-    username = request.data.get('username')
+    """
+    Login endpoint that accepts either username or email plus password.
+    Frontend currently sends the identifier in the `username` field, but the
+    form label says "Email", so we support both for flexibility.
+    """
+    identifier = request.data.get('username') or request.data.get('email')
     password = request.data.get('password')
-    
-    if not username or not password:
-        return Response({'error': 'Username and password required'}, 
-                       status=status.HTTP_400_BAD_REQUEST)
-    
+
+    if not identifier or not password:
+        return Response(
+            {'error': 'Username/email and password required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Resolve identifier to a username if an email was provided
+    from django.contrib.auth import get_user_model
+
+    UserModel = get_user_model()
+    username = identifier
+
+    # If it looks like an email or no user with that username exists, try email lookup
+    if '@' in identifier or not UserModel.objects.filter(username=identifier).exists():
+        try:
+            user_obj = UserModel.objects.get(email=identifier)
+            username = user_obj.username
+        except UserModel.DoesNotExist:
+            # Fall back to using identifier as username; authenticate will fail if invalid
+            username = identifier
+
     user = authenticate(username=username, password=password)
     
     if user is None:

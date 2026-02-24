@@ -3,6 +3,8 @@ import { useNavigate, Link as RouterLink } from 'react-router-dom';
 import {
   Box,
   Container,
+  Grid,
+  Paper,
   TextField,
   Button,
   Typography,
@@ -10,6 +12,7 @@ import {
   InputAdornment,
   IconButton,
   CircularProgress,
+  Chip,
 } from '@mui/material';
 import {
   Email,
@@ -49,220 +52,314 @@ const Login = () => {
       sx={{
         minHeight: '100vh',
         display: 'flex',
-        flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: '#f8fafc',
-        position: 'relative',
-        backgroundImage: `
-          radial-gradient(circle at 20% 30%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
-          radial-gradient(circle at 80% 70%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
-          radial-gradient(circle at 40% 80%, rgba(139, 92, 246, 0.05) 0%, transparent 50%)
-        `,
+        // Softer, lighter background for better contrast with the card
+        background:
+          'radial-gradient(circle at top, #e0e7ff 0%, #f9fafb 55%, #f5f3ff 100%)',
+        px: 2,
+        py: 4,
       }}
     >
-      {/* Register Button - Top Right */}
-      <Button
-        component={RouterLink}
-        to="/register"
-        variant="contained"
-        sx={{
-          position: 'absolute',
-          top: 24,
-          right: 24,
-          backgroundColor: '#8b5cf6',
-          color: '#ffffff',
-          textTransform: 'none',
-          borderRadius: 2,
-          px: 3,
-          py: 1,
-          fontWeight: 600,
-          '&:hover': {
-            backgroundColor: '#7c3aed',
-          },
-        }}
-      >
-        Register
-      </Button>
-
-      <Container maxWidth="sm">
-        <Box
-          sx={{
-            width: '100%',
-            maxWidth: 450,
-            backgroundColor: '#ffffff',
-            borderRadius: 3,
-            p: 4,
-            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.1)',
-          }}
-        >
-          {/* Logo and Tagline */}
-          <Box sx={{ textAlign: 'center', mb: 4 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 1 }}>
-              <School sx={{ fontSize: 32, color: '#8b5cf6', mr: 1 }} />
-              <Typography
-                variant="h4"
-                component="h1"
+      <Container maxWidth="lg">
+        <Grid container spacing={4} alignItems="stretch">
+          {/* Left: brand / hero */}
+          <Grid
+            item
+            xs={12}
+            md={6}
+            sx={{
+              display: { xs: 'none', md: 'flex' },
+              flexDirection: 'column',
+              justifyContent: 'center',
+            }}
+          >
+            <Box sx={{ mb: 4 }}>
+              <Chip
+                label="Welcome to EduAgent"
                 sx={{
-                  fontWeight: 700,
-                  background: 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)',
+                  mb: 2,
+                  backgroundColor: 'rgba(139, 92, 246, 0.08)',
+                  color: '#7c3aed',
+                  fontWeight: 600,
+                }}
+              />
+              <Typography
+                variant="h3"
+                sx={{
+                  fontWeight: 800,
+                  mb: 2,
+                  lineHeight: 1.15,
+                  background: 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 50%, #22c55e 100%)',
                   WebkitBackgroundClip: 'text',
                   WebkitTextFillColor: 'transparent',
-                  backgroundClip: 'text',
                 }}
               >
-                EduAgent
+                Learn smarter, not harder.
+              </Typography>
+              <Typography variant="body1" sx={{ color: '#475569', maxWidth: 480 }}>
+                Access your personalized dashboard, track progress, and manage courses and quizzes
+                — all from a single, beautifully designed workspace.
               </Typography>
             </Box>
-            <Typography
-              variant="body2"
+            <Box
               sx={{
-                color: '#64748b',
-                fontSize: '0.875rem',
-                mt: 1,
+                display: 'flex',
+                gap: 2,
+                flexWrap: 'wrap',
               }}
             >
-              Your Gateway to Personalized Learning.
-            </Typography>
-          </Box>
+              <Chip label="Smart Analytics" />
+              <Chip label="Interactive Quizzes" />
+            </Box>
+          </Grid>
 
-          {/* Welcome Message */}
-          <Typography
-            variant="h4"
-            component="h2"
-            sx={{
-              fontWeight: 700,
-              color: '#1e293b',
-              mb: 1,
-            }}
-          >
-            Welcome back
-          </Typography>
-          <Typography
-            variant="body1"
-            sx={{
-              color: '#64748b',
-              mb: 4,
-            }}
-          >
-            Login to your account
-          </Typography>
-
-          <form onSubmit={handleSubmit}>
-            {/* Email Field */}
-            <TextField
-              fullWidth
-              label="Your Email *"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              error={!!error}
-              helperText={error && error.includes('email') ? error : ''}
+          {/* Right: login card */}
+          <Grid item xs={12} md={6}>
+            <Paper
+              elevation={6}
               sx={{
-                mb: 2,
-                '& .MuiOutlinedInput-root': {
-                  '&:hover fieldset': {
-                    borderColor: '#8b5cf6',
-                  },
-                  '&.Mui-focused fieldset': {
-                    borderColor: '#8b5cf6',
-                  },
-                },
+                borderRadius: 3,
+                p: { xs: 3, sm: 4 },
+                maxWidth: 480,
+                ml: { xs: 'auto', md: 'auto' },
+                mr: { xs: 'auto', md: 0 },
+                backdropFilter: 'blur(10px)',
               }}
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <Email sx={{ color: '#94a3b8' }} />
-                  </InputAdornment>
-                ),
-              }}
-            />
-
-            {/* Password Field */}
-            <TextField
-              fullWidth
-              label="Password *"
-              type={showPassword ? 'text' : 'password'}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              error={!!error}
-              helperText={error && error.includes('password') ? error : error || ''}
-              sx={{
-                mb: 2,
-                '& .MuiOutlinedInput-root': {
-                  '&:hover fieldset': {
-                    borderColor: '#8b5cf6',
-                  },
-                  '&.Mui-focused fieldset': {
-                    borderColor: '#8b5cf6',
-                  },
-                },
-              }}
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton
-                      onClick={() => setShowPassword(!showPassword)}
-                      edge="end"
-                      sx={{ color: '#94a3b8' }}
-                    >
-                      {showPassword ? <VisibilityOff /> : <Visibility />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              }}
-            />
-
-            {/* Forgot Password Link */}
-            <Box sx={{ textAlign: 'right', mb: 3 }}>
-              <Link
-                component="button"
-                type="button"
+            >
+              {/* Header */}
+              <Box
                 sx={{
-                  color: '#64748b',
-                  textDecoration: 'none',
-                  fontSize: '0.875rem',
-                  '&:hover': {
-                    textDecoration: 'underline',
-                  },
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  mb: 3,
                 }}
               >
-                Forgot password?
-              </Link>
-            </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Box
+                    sx={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: '50%',
+                      background: 'linear-gradient(145deg, #8b5cf6, #6366f1)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      boxShadow: '0 10px 25px rgba(79, 70, 229, 0.35)',
+                    }}
+                  >
+                    <School sx={{ color: '#ffffff', fontSize: 22 }} />
+                  </Box>
+                  <Box>
+                    <Typography
+                      variant="h5"
+                      sx={{ fontWeight: 700, letterSpacing: 0.4 }}
+                    >
+                      EduAgent
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: '#64748b' }}>
+                      Learning Management System
+                    </Typography>
+                  </Box>
+                </Box>
 
-            {/* Login Button */}
-            <Button
-              type="submit"
-              fullWidth
-              variant="contained"
-              disabled={loading}
-              sx={{
-                py: 1.5,
-                backgroundColor: '#8b5cf6',
-                color: '#ffffff',
-                fontSize: '1rem',
-                fontWeight: 600,
-                textTransform: 'none',
-                borderRadius: 2,
-                '&:hover': {
-                  backgroundColor: '#7c3aed',
-                },
-                '&:disabled': {
-                  backgroundColor: '#c4b5fd',
-                },
-              }}
-            >
-              {loading ? (
-                <CircularProgress size={24} color="inherit" />
-              ) : (
-                'Log in'
+                <Button
+                  component={RouterLink}
+                  to="/register"
+                  variant="outlined"
+                  size="small"
+                  sx={{
+                    textTransform: 'none',
+                    borderRadius: 999,
+                    borderColor: '#c4b5fd',
+                    color: '#7c3aed',
+                    fontWeight: 600,
+                    px: 2,
+                    '&:hover': {
+                      borderColor: '#7c3aed',
+                      backgroundColor: 'rgba(124, 58, 237, 0.04)',
+                    },
+                  }}
+                >
+                  Create account
+                </Button>
+              </Box>
+
+              <Typography
+                variant="h4"
+                sx={{
+                  fontWeight: 700,
+                  mb: 1,
+                  color: '#0f172a',
+                }}
+              >
+                Sign in
+              </Typography>
+              <Typography variant="body2" sx={{ mb: 3, color: '#6b7280' }}>
+                Enter your credentials to access your courses and dashboard.
+              </Typography>
+
+              {error && (
+                <Box
+                  sx={{
+                    mb: 2,
+                    p: 1.5,
+                    borderRadius: 2,
+                    backgroundColor: '#fef2f2',
+                    color: '#b91c1c',
+                    fontSize: '0.85rem',
+                  }}
+                >
+                  {error}
+                </Box>
               )}
-            </Button>
-          </form>
-        </Box>
+
+              <form onSubmit={handleSubmit}>
+                {/* Email Field */}
+                <TextField
+                  fullWidth
+                  label="Email address"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  sx={{
+                    mb: 2,
+                    '& .MuiOutlinedInput-root': {
+                      borderRadius: 2,
+                      '&:hover fieldset': {
+                        borderColor: '#8b5cf6',
+                      },
+                      '&.Mui-focused fieldset': {
+                        borderColor: '#8b5cf6',
+                      },
+                    },
+                  }}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <Email sx={{ color: '#94a3b8' }} />
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+
+                {/* Password Field */}
+                <TextField
+                  fullWidth
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  sx={{
+                    mb: 1,
+                    '& .MuiOutlinedInput-root': {
+                      borderRadius: 2,
+                      '&:hover fieldset': {
+                        borderColor: '#8b5cf6',
+                      },
+                      '&.Mui-focused fieldset': {
+                        borderColor: '#8b5cf6',
+                      },
+                    },
+                  }}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowPassword(!showPassword)}
+                          edge="end"
+                          sx={{ color: '#94a3b8' }}
+                        >
+                          {showPassword ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+
+                <Box
+                  sx={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    mb: 3,
+                  }}
+                >
+                  <Typography variant="caption" sx={{ color: '#6b7280' }}>
+                    Use the email you registered with.
+                  </Typography>
+                  <Link
+                    component="button"
+                    type="button"
+                    sx={{
+                      color: '#7c3aed',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      textDecoration: 'none',
+                      '&:hover': {
+                        textDecoration: 'underline',
+                      },
+                    }}
+                  >
+                    Forgot password?
+                  </Link>
+                </Box>
+
+                <Button
+                  type="submit"
+                  fullWidth
+                  variant="contained"
+                  disabled={loading}
+                  sx={{
+                    py: 1.4,
+                    borderRadius: 2,
+                    background: 'linear-gradient(135deg, #8b5cf6, #6366f1)',
+                    color: '#ffffff',
+                    fontSize: '0.95rem',
+                    fontWeight: 700,
+                    textTransform: 'none',
+                    boxShadow: '0 10px 20px rgba(79, 70, 229, 0.45)',
+                    '&:hover': {
+                      background: 'linear-gradient(135deg, #7c3aed, #4f46e5)',
+                      boxShadow: '0 12px 25px rgba(79, 70, 229, 0.55)',
+                    },
+                    '&:disabled': {
+                      background: '#c4b5fd',
+                      boxShadow: 'none',
+                    },
+                  }}
+                >
+                  {loading ? (
+                    <CircularProgress size={22} color="inherit" />
+                  ) : (
+                    'Sign in'
+                  )}
+                </Button>
+              </form>
+
+              <Box sx={{ mt: 3, textAlign: 'center' }}>
+                <Typography variant="body2" sx={{ color: '#6b7280' }}>
+                  Don&apos;t have an account?{' '}
+                  <Link
+                    component={RouterLink}
+                    to="/register"
+                    sx={{
+                      color: '#7c3aed',
+                      fontWeight: 600,
+                      textDecoration: 'none',
+                      '&:hover': { textDecoration: 'underline' },
+                    }}
+                  >
+                    Sign up now
+                  </Link>
+                </Typography>
+              </Box>
+            </Paper>
+          </Grid>
+        </Grid>
       </Container>
     </Box>
   );

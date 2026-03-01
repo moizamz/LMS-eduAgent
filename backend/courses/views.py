@@ -3,6 +3,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Q, Count, Avg
+from django.http import FileResponse, Http404
 from .models import Course, Module, Enrollment, ModuleProgress, Section, Subsection, SubsectionProgress
 from .serializers import (
     CourseSerializer, ModuleSerializer, EnrollmentSerializer, ModuleProgressSerializer,
@@ -205,6 +206,36 @@ class SubsectionDetailView(generics.RetrieveUpdateDestroyAPIView):
         return Subsection.objects.filter(section__course_id__in=enrolled)
 
 
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def serve_subsection_pdf(request, pk):
+    """Serve PDF file for viewing in iframe (avoids cross-origin issues)."""
+    try:
+        sub = Subsection.objects.select_related('section', 'section__course').get(pk=pk)
+    except Subsection.DoesNotExist:
+        raise Http404("Subsection not found")
+    if not sub.pdf_file:
+        raise Http404("No PDF attached")
+    # Check access
+    course = sub.section.course
+    if request.user.is_admin:
+        pass
+    elif request.user.is_instructor and course.instructor == request.user:
+        pass
+    elif request.user.is_student and Enrollment.objects.filter(student=request.user, course=course).exists():
+        pass
+    else:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        file_handle = sub.pdf_file.open('rb')
+        response = FileResponse(file_handle, content_type='application/pdf')
+        response['Content-Disposition'] = 'inline; filename="lecture.pdf"'
+        response['X-Frame-Options'] = 'SAMEORIGIN'
+        return response
+    except (ValueError, OSError):
+        raise Http404("File not found")
+
+
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def enroll_course(request, course_id):
@@ -275,6 +306,7 @@ def mark_module_complete(request, enrollment_id, module_id):
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def mark_subsection_complete(request, enrollment_id, subsection_id):
+    """Toggle subsection complete status (complete <-> uncomplete)."""
     try:
         enrollment = Enrollment.objects.get(id=enrollment_id, student=request.user)
         subsection = Subsection.objects.get(id=subsection_id, section__course=enrollment.course)
@@ -283,7 +315,7 @@ def mark_subsection_complete(request, enrollment_id, subsection_id):
     progress, created = SubsectionProgress.objects.get_or_create(
         enrollment=enrollment, subsection=subsection
     )
-    progress.is_completed = True
+    progress.is_completed = not progress.is_completed
     progress.save()
     total = Subsection.objects.filter(section__course=enrollment.course).count()
     completed = enrollment.subsection_progress.filter(is_completed=True).count()
@@ -294,6 +326,8 @@ def mark_subsection_complete(request, enrollment_id, subsection_id):
     enrollment.progress_percentage = (completed_items / total_items * 100) if total_items > 0 else 0
     if enrollment.progress_percentage >= 100:
         enrollment.is_completed = True
+    else:
+        enrollment.is_completed = False
     enrollment.save()
     return Response(SubsectionProgressSerializer(progress).data)
 

@@ -10,6 +10,7 @@ urlpatterns = [
     path('sections/<int:pk>/', views.SectionDetailView.as_view(), name='section_detail'),
     path('subsections/', views.SubsectionListView.as_view(), name='subsection_list'),
     path('subsections/<int:pk>/', views.SubsectionDetailView.as_view(), name='subsection_detail'),
+    path('subsections/<int:pk>/pdf/', views.serve_subsection_pdf, name='subsection_pdf'),
     path('<int:course_id>/enroll/', views.enroll_course, name='enroll_course'),
     path('my-enrollments/', views.my_enrollments, name='my_enrollments'),
     path('progress/<int:course_id>/', views.course_progress, name='course_progress'),

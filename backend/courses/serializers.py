@@ -93,12 +93,16 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     student = UserSerializer(read_only=True)
     course = CourseSerializer(read_only=True)
     course_id = serializers.IntegerField(write_only=True)
+    completed_subsection_ids = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Enrollment
         fields = ['id', 'student', 'course', 'course_id', 'enrolled_at',
-                  'progress_percentage', 'is_completed', 'completed_at']
+                  'progress_percentage', 'is_completed', 'completed_at', 'completed_subsection_ids']
         read_only_fields = ['id', 'student', 'enrolled_at', 'completed_at']
+    
+    def get_completed_subsection_ids(self, obj):
+        return list(obj.subsection_progress.filter(is_completed=True).values_list('subsection_id', flat=True))
     
     def create(self, validated_data):
         validated_data['student'] = self.context['request'].user

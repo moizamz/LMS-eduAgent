@@ -17,8 +17,28 @@ class QuestionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Question
         fields = ['id', 'quiz', 'question_text', 'question_type', 
-                  'points', 'order', 'choices']
+                  'points', 'order', 'explanation', 'hint', 'difficulty', 'taxonomy', 'choices']
         read_only_fields = ['id']
+
+
+class QuestionForAttemptSerializer(serializers.ModelSerializer):
+    """Used during quiz attempt - includes hint, excludes explanation."""
+    choices = ChoiceSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Question
+        fields = ['id', 'quiz', 'question_text', 'question_type', 
+                  'points', 'order', 'hint', 'difficulty', 'taxonomy', 'choices']
+
+
+class QuestionForReviewSerializer(serializers.ModelSerializer):
+    """Used in review after submit - includes explanation."""
+    choices = ChoiceSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Question
+        fields = ['id', 'quiz', 'question_text', 'question_type', 
+                  'points', 'order', 'explanation', 'hint', 'difficulty', 'taxonomy', 'choices']
 
 
 class QuizSerializer(serializers.ModelSerializer):

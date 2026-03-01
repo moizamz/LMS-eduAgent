@@ -25,12 +25,29 @@ class Question(models.Model):
         ('mcq', 'Multiple Choice'),
         ('true_false', 'True/False'),
     ]
+    DIFFICULTY_CHOICES = [
+        ('easy', 'Easy'),
+        ('medium', 'Medium'),
+        ('hard', 'Hard'),
+    ]
+    TAXONOMY_CHOICES = [
+        ('remember', 'Remember'),
+        ('understand', 'Understand'),
+        ('apply', 'Apply'),
+        ('analyze', 'Analyze'),
+        ('evaluate', 'Evaluate'),
+        ('create', 'Create'),
+    ]
     
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE, related_name='questions')
     question_text = models.TextField()
     question_type = models.CharField(max_length=20, choices=QUESTION_TYPE_CHOICES, default='mcq')
     points = models.PositiveIntegerField(default=1)
     order = models.PositiveIntegerField(default=0)
+    explanation = models.TextField(blank=True, null=True)
+    hint = models.TextField(blank=True, null=True)
+    difficulty = models.CharField(max_length=20, choices=DIFFICULTY_CHOICES, blank=True, null=True)
+    taxonomy = models.CharField(max_length=20, choices=TAXONOMY_CHOICES, blank=True, null=True)
     
     class Meta:
         ordering = ['order', 'id']

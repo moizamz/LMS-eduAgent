@@ -1,6 +1,56 @@
 from rest_framework import serializers
-from .models import Course, Module, Enrollment, ModuleProgress
+from .models import Course, Module, Enrollment, ModuleProgress, Section, Subsection, SubsectionProgress
 from accounts.serializers import UserSerializer
+
+
+class SubsectionSerializer(serializers.ModelSerializer):
+    pdf_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Subsection
+        fields = ['id', 'section', 'title', 'order', 'pdf_file', 'pdf_url', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_pdf_url(self, obj):
+        if obj.pdf_file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.pdf_file.url)
+            return obj.pdf_file.url
+        return None
+
+
+class SectionSerializer(serializers.ModelSerializer):
+    subsections = SubsectionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Section
+        fields = ['id', 'course', 'title', 'order', 'subsections', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class SectionCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Section
+        fields = ['id', 'course', 'title', 'order', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class SubsectionCreateSerializer(serializers.ModelSerializer):
+    pdf_url = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Subsection
+        fields = ['id', 'section', 'title', 'order', 'pdf_file', 'pdf_url', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_pdf_url(self, obj):
+        if obj and obj.pdf_file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.pdf_file.url)
+            return obj.pdf_file.url
+        return None
 
 
 class ModuleSerializer(serializers.ModelSerializer):
@@ -16,12 +66,13 @@ class CourseSerializer(serializers.ModelSerializer):
     instructor = UserSerializer(read_only=True)
     instructor_id = serializers.IntegerField(write_only=True, required=False)
     modules = ModuleSerializer(many=True, read_only=True)
+    sections = SectionSerializer(many=True, read_only=True)
     enrollment_count = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Course
         fields = ['id', 'title', 'description', 'instructor', 'instructor_id',
-                  'thumbnail', 'price', 'is_published', 'modules', 'enrollment_count',
+                  'thumbnail', 'price', 'is_published', 'modules', 'sections', 'enrollment_count',
                   'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
     
@@ -61,5 +112,14 @@ class ModuleProgressSerializer(serializers.ModelSerializer):
         model = ModuleProgress
         fields = ['id', 'enrollment', 'module', 'is_completed', 
                   'completed_at', 'last_accessed']
+        read_only_fields = ['id', 'completed_at', 'last_accessed']
+
+
+class SubsectionProgressSerializer(serializers.ModelSerializer):
+    subsection = SubsectionSerializer(read_only=True)
+
+    class Meta:
+        model = SubsectionProgress
+        fields = ['id', 'enrollment', 'subsection', 'is_completed', 'completed_at', 'last_accessed']
         read_only_fields = ['id', 'completed_at', 'last_accessed']
 

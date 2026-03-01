@@ -217,3 +217,33 @@ def block_user(request, user_id):
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([permissions.IsAuthenticated])
+def unapprove_instructor(request, user_id):
+    if not request.user.is_admin:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        user = User.objects.get(id=user_id, role='instructor')
+        user.is_approved = False
+        user.save()
+        return Response({'message': 'Instructor unapproved', 'user': UserSerializer(user).data})
+    except User.DoesNotExist:
+        return Response({'error': 'Instructor not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([permissions.IsAuthenticated])
+def unblock_user(request, user_id):
+    if not request.user.is_admin:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        user = User.objects.get(id=user_id)
+        user.is_active = True
+        user.save()
+        return Response({'message': 'User unblocked', 'user': UserSerializer(user).data})
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+

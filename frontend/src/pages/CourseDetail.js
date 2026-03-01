@@ -23,7 +23,10 @@ import {
   FormControlLabel,
   Radio,
 } from '@mui/material';
-import { PlayArrow, Description, Link as LinkIcon, TextFields } from '@mui/icons-material';
+import {
+  PlayArrow, Description, Link as LinkIcon, TextFields,
+  Add, Delete, UploadFile, Folder, InsertDriveFile,
+} from '@mui/icons-material';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 import { useAuth } from '../contexts/AuthContext';
@@ -51,6 +54,13 @@ const CourseDetail = () => {
     passing_score: 60,
     max_attempts: 3,
   });
+  const [sectionDialogOpen, setSectionDialogOpen] = useState(false);
+  const [subsectionDialogOpen, setSubsectionDialogOpen] = useState(false);
+  const [sectionForm, setSectionForm] = useState({ title: '', order: 0 });
+  const [subsectionForm, setSubsectionForm] = useState({ title: '', order: 0, pdf_file: null });
+  const [selectedSection, setSelectedSection] = useState(null);
+  const [viewingPdf, setViewingPdf] = useState(null);
+  const [enrollment, setEnrollment] = useState(null);
 
   useEffect(() => {
     fetchCourse();
@@ -74,7 +84,9 @@ const CourseDetail = () => {
     try {
       const response = await api.get('/courses/my-enrollments/');
       const enrollments = Array.isArray(response.data) ? response.data : [];
-      setEnrolled(enrollments.some((e) => e.course?.id === parseInt(id)));
+      const myEnrollment = enrollments.find((e) => e.course?.id === parseInt(id));
+      setEnrolled(!!myEnrollment);
+      setEnrollment(myEnrollment || null);
     } catch (error) {
       console.error('Error checking enrollment:', error);
     }
@@ -188,6 +200,106 @@ const CourseDetail = () => {
     }
   };
 
+  const isInstructorOrAdmin = user?.role === 'instructor' || user?.role === 'admin';
+
+  const handleCreateSection = async () => {
+    if (!sectionForm.title.trim()) {
+      toast.error('Section title is required');
+      return;
+    }
+    try {
+      await api.post('/courses/sections/', {
+        course: parseInt(id, 10),
+        title: sectionForm.title.trim(),
+        order: sectionForm.order,
+      });
+      toast.success('Section created');
+      setSectionDialogOpen(false);
+      setSectionForm({ title: '', order: 0 });
+      fetchCourse();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || error.response?.data?.error || 'Failed to create section');
+    }
+  };
+
+  const handleDeleteSection = async (sectionId) => {
+    if (!window.confirm('Delete this section and all its subsections?')) return;
+    try {
+      await api.delete(`/courses/sections/${sectionId}/`);
+      toast.success('Section deleted');
+      fetchCourse();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to delete section');
+    }
+  };
+
+  const handleCreateSubsection = async () => {
+    if (!selectedSection || !subsectionForm.title.trim()) {
+      toast.error('Subsection title is required');
+      return;
+    }
+    try {
+      const formData = new FormData();
+      formData.append('section', selectedSection.id);
+      formData.append('title', subsectionForm.title.trim());
+      formData.append('order', subsectionForm.order);
+      if (subsectionForm.pdf_file) {
+        formData.append('pdf_file', subsectionForm.pdf_file);
+      }
+      await api.post('/courses/subsections/', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      toast.success('Subsection created');
+      setSubsectionDialogOpen(false);
+      setSubsectionForm({ title: '', order: 0, pdf_file: null });
+      setSelectedSection(null);
+      fetchCourse();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to create subsection');
+    }
+  };
+
+  const handleDeleteSubsection = async (subsectionId) => {
+    if (!window.confirm('Delete this lecture?')) return;
+    try {
+      await api.delete(`/courses/subsections/${subsectionId}/`);
+      toast.success('Lecture deleted');
+      fetchCourse();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to delete lecture');
+    }
+  };
+
+  const handleUploadPdf = async (subsectionId, file) => {
+    if (!file || file.type !== 'application/pdf') {
+      toast.error('Please select a PDF file');
+      return;
+    }
+    try {
+      const formData = new FormData();
+      formData.append('pdf_file', file);
+      await api.patch(`/courses/subsections/${subsectionId}/`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      toast.success('PDF uploaded');
+      fetchCourse();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to upload PDF');
+    }
+  };
+
+  const handleMarkSubsectionComplete = async (subsectionId) => {
+    if (!enrollment) return;
+    try {
+      await api.post(`/courses/${enrollment.id}/subsections/${subsectionId}/complete/`);
+      toast.success('Marked as complete');
+      checkEnrollment();
+      fetchCourse();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to mark complete');
+    }
+  };
+
   if (loading) {
     return (
       <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
@@ -254,32 +366,249 @@ const CourseDetail = () => {
       </Box>
 
       {tabValue === 0 && (
-        <Card>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>
-              Course Modules
-            </Typography>
-            <List>
-              {course.modules && course.modules.length > 0 ? (
-                course.modules.map((module) => (
-                  <ListItem key={module.id}>
-                    {getContentIcon(module.content_type)}
-                    <ListItemText
-                      primary={module.title}
-                      secondary={module.description}
-                      sx={{ ml: 2 }}
-                    />
-                    <Chip label={module.content_type} size="small" />
-                  </ListItem>
+        <>
+          {isInstructorOrAdmin && (
+            <Box sx={{ mb: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+              <Button
+                variant="contained"
+                startIcon={<Add />}
+                onClick={() => setSectionDialogOpen(true)}
+              >
+                Add Section
+              </Button>
+            </Box>
+          )}
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Course Content
+              </Typography>
+              {course.sections && course.sections.length > 0 ? (
+                course.sections.map((section) => (
+                  <Box key={section.id} sx={{ mb: 3 }}>
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        mb: 1,
+                        p: 1,
+                        backgroundColor: '#f5f5f5',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <Folder sx={{ color: '#8b5cf6' }} />
+                      <Typography variant="subtitle1" sx={{ fontWeight: 600, flexGrow: 1 }}>
+                        {section.title}
+                      </Typography>
+                      {isInstructorOrAdmin && (
+                        <>
+                          <Button
+                            size="small"
+                            startIcon={<Add />}
+                            onClick={() => {
+                              setSelectedSection(section);
+                              setSubsectionForm({ title: '', order: section.subsections?.length || 0, pdf_file: null });
+                              setSubsectionDialogOpen(true);
+                            }}
+                          >
+                            Add Lecture
+                          </Button>
+                          <Button
+                            size="small"
+                            color="error"
+                            startIcon={<Delete />}
+                            onClick={() => handleDeleteSection(section.id)}
+                          >
+                            Delete
+                          </Button>
+                        </>
+                      )}
+                    </Box>
+                    <List dense sx={{ pl: 2 }}>
+                      {section.subsections && section.subsections.length > 0 ? (
+                        section.subsections.map((sub) => (
+                          <ListItem
+                            key={sub.id}
+                            sx={{
+                              borderLeft: '3px solid #8b5cf6',
+                              mb: 1,
+                              backgroundColor: '#fafafa',
+                              borderRadius: 1,
+                            }}
+                            secondaryAction={
+                              isInstructorOrAdmin ? (
+                                <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                                  <Button
+                                    component="label"
+                                    size="small"
+                                    startIcon={<UploadFile />}
+                                  >
+                                    {sub.pdf_file ? 'Replace PDF' : 'Upload PDF'}
+                                    <input
+                                      type="file"
+                                      accept="application/pdf"
+                                      hidden
+                                      onChange={(e) => {
+                                        const f = e.target.files?.[0];
+                                        if (f) handleUploadPdf(sub.id, f);
+                                      }}
+                                    />
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    color="error"
+                                    startIcon={<Delete />}
+                                    onClick={() => handleDeleteSubsection(sub.id)}
+                                  >
+                                    Delete
+                                  </Button>
+                                </Box>
+                              ) : (
+                                sub.pdf_url && (
+                                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      startIcon={<Description />}
+                                      onClick={() => setViewingPdf(sub)}
+                                    >
+                                      View PDF
+                                    </Button>
+                                    {enrolled && (
+                                      <Button
+                                        size="small"
+                                        variant="contained"
+                                        onClick={() => handleMarkSubsectionComplete(sub.id)}
+                                      >
+                                        Mark Complete
+                                      </Button>
+                                    )}
+                                  </Box>
+                                )
+                              )
+                            }
+                          >
+                            <InsertDriveFile sx={{ mr: 1, color: '#757575' }} />
+                            <ListItemText
+                              primary={sub.title}
+                              secondary={sub.pdf_file ? 'PDF attached' : 'No PDF uploaded'}
+                            />
+                          </ListItem>
+                        ))
+                      ) : (
+                        <ListItem>
+                          <Typography variant="body2" color="text.secondary">
+                            No lectures in this section
+                          </Typography>
+                        </ListItem>
+                      )}
+                    </List>
+                  </Box>
                 ))
               ) : (
                 <Typography variant="body2" color="text.secondary">
-                  No modules available
+                  {isInstructorOrAdmin
+                    ? 'No sections yet. Click "Add Section" to create course content.'
+                    : 'No content available for this course.'}
                 </Typography>
               )}
-            </List>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+
+          {/* Create Section Dialog */}
+          <Dialog open={sectionDialogOpen} onClose={() => setSectionDialogOpen(false)} maxWidth="sm" fullWidth>
+            <DialogTitle>Add Section</DialogTitle>
+            <DialogContent>
+              <TextField
+                fullWidth
+                label="Section Title"
+                margin="normal"
+                value={sectionForm.title}
+                onChange={(e) => setSectionForm((p) => ({ ...p, title: e.target.value }))}
+                placeholder="e.g. Week 1: Introduction"
+              />
+              <TextField
+                fullWidth
+                label="Order"
+                type="number"
+                margin="normal"
+                value={sectionForm.order}
+                onChange={(e) => setSectionForm((p) => ({ ...p, order: parseInt(e.target.value, 10) || 0 }))}
+              />
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setSectionDialogOpen(false)}>Cancel</Button>
+              <Button variant="contained" onClick={handleCreateSection}>Create</Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* Create Subsection Dialog */}
+          <Dialog open={subsectionDialogOpen} onClose={() => setSubsectionDialogOpen(false)} maxWidth="sm" fullWidth>
+            <DialogTitle>Add Lecture</DialogTitle>
+            <DialogContent>
+              {selectedSection && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  Section: {selectedSection.title}
+                </Typography>
+              )}
+              <TextField
+                fullWidth
+                label="Lecture Title"
+                margin="normal"
+                value={subsectionForm.title}
+                onChange={(e) => setSubsectionForm((p) => ({ ...p, title: e.target.value }))}
+                placeholder="e.g. Lecture 1: Introduction to Python"
+              />
+              <TextField
+                fullWidth
+                label="Order"
+                type="number"
+                margin="normal"
+                value={subsectionForm.order}
+                onChange={(e) => setSubsectionForm((p) => ({ ...p, order: parseInt(e.target.value, 10) || 0 }))}
+              />
+              <Box sx={{ mt: 2 }}>
+                <Button component="label" variant="outlined" startIcon={<UploadFile />} fullWidth>
+                  {subsectionForm.pdf_file ? subsectionForm.pdf_file.name : 'Upload PDF (optional)'}
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    hidden
+                    onChange={(e) => setSubsectionForm((p) => ({ ...p, pdf_file: e.target.files?.[0] || null }))}
+                  />
+                </Button>
+              </Box>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setSubsectionDialogOpen(false)}>Cancel</Button>
+              <Button variant="contained" onClick={handleCreateSubsection}>Create</Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* PDF Viewer Dialog for students */}
+          <Dialog
+            open={!!viewingPdf}
+            onClose={() => setViewingPdf(null)}
+            maxWidth="lg"
+            fullWidth
+            PaperProps={{ sx: { height: '90vh' } }}
+          >
+            <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              {viewingPdf?.title}
+              <Button onClick={() => setViewingPdf(null)}>Close</Button>
+            </DialogTitle>
+            <DialogContent sx={{ p: 0, overflow: 'hidden' }}>
+              {viewingPdf?.pdf_url && (
+                <iframe
+                  title={viewingPdf.title}
+                  src={viewingPdf.pdf_url}
+                  style={{ width: '100%', height: '100%', border: 'none' }}
+                />
+              )}
+            </DialogContent>
+          </Dialog>
+        </>
       )}
 
       {tabValue === 1 && (
@@ -297,7 +626,7 @@ const CourseDetail = () => {
 
       {tabValue === 2 && (
         <>
-          {user?.role === 'instructor' && (
+          {isInstructorOrAdmin && (
             <Box sx={{ mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
               <Button variant="contained" onClick={() => setCreateQuizOpen(true)}>
                 Create Quiz

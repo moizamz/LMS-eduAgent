@@ -39,7 +39,9 @@ const AdminPanel = () => {
     try {
       if (tabValue === 0) {
         const response = await api.get('/auth/users/');
-        setUsers(Array.isArray(response.data) ? response.data : response.data.results || []);
+        const allUsers = Array.isArray(response.data) ? response.data : response.data.results || [];
+        // Show only instructors in the admin panel user list
+        setUsers(allUsers.filter((u) => u.role === 'instructor'));
       } else if (tabValue === 1) {
         const response = await api.get('/courses/');
         setCourses(Array.isArray(response.data) ? response.data : response.data.results || []);
@@ -65,6 +67,16 @@ const AdminPanel = () => {
     }
   };
 
+  const handleUnapproveInstructor = async (userId) => {
+    try {
+      await api.patch(`/auth/users/${userId}/unapprove/`);
+      toast.success('Instructor unapproved');
+      fetchData();
+    } catch (error) {
+      toast.error('Failed to unapprove instructor');
+    }
+  };
+
   const handleBlockUser = async (userId) => {
     try {
       await api.patch(`/auth/users/${userId}/block/`);
@@ -72,6 +84,16 @@ const AdminPanel = () => {
       fetchData();
     } catch (error) {
       toast.error('Failed to block user');
+    }
+  };
+
+  const handleUnblockUser = async (userId) => {
+    try {
+      await api.patch(`/auth/users/${userId}/unblock/`);
+      toast.success('User unblocked');
+      fetchData();
+    } catch (error) {
+      toast.error('Failed to unblock user');
     }
   };
 
@@ -116,19 +138,26 @@ const AdminPanel = () => {
                         <Chip label={user.role} size="small" />
                       </TableCell>
                       <TableCell>
-                        {user.role === 'instructor' && (
-                          <Chip
-                            label={user.is_approved ? 'Approved' : 'Pending'}
-                            color={user.is_approved ? 'success' : 'warning'}
-                            size="small"
-                          />
-                        )}
+                        <Chip
+                          label={user.is_approved ? 'Approved' : 'Pending'}
+                          color={user.is_approved ? 'success' : 'warning'}
+                          size="small"
+                          sx={{ mr: user.is_active ? 1 : 0 }}
+                        />
                         {!user.is_active && (
                           <Chip label="Blocked" color="error" size="small" />
                         )}
                       </TableCell>
                       <TableCell>
-                        {user.role === 'instructor' && !user.is_approved && (
+                        {user.is_approved ? (
+                          <Button
+                            size="small"
+                            startIcon={<CheckCircle />}
+                            onClick={() => handleUnapproveInstructor(user.id)}
+                          >
+                            Unapprove
+                          </Button>
+                        ) : (
                           <Button
                             size="small"
                             startIcon={<CheckCircle />}
@@ -137,7 +166,7 @@ const AdminPanel = () => {
                             Approve
                           </Button>
                         )}
-                        {user.is_active && (
+                        {user.is_active ? (
                           <Button
                             size="small"
                             color="error"
@@ -145,6 +174,15 @@ const AdminPanel = () => {
                             onClick={() => handleBlockUser(user.id)}
                           >
                             Block
+                          </Button>
+                        ) : (
+                          <Button
+                            size="small"
+                            color="primary"
+                            startIcon={<Block />}
+                            onClick={() => handleUnblockUser(user.id)}
+                          >
+                            Unblock
                           </Button>
                         )}
                       </TableCell>

@@ -1,9 +1,14 @@
 from rest_framework import generics, status, permissions, serializers
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Q, Count, Avg
-from .models import Course, Module, Enrollment, ModuleProgress
-from .serializers import CourseSerializer, ModuleSerializer, EnrollmentSerializer, ModuleProgressSerializer
+from .models import Course, Module, Enrollment, ModuleProgress, Section, Subsection, SubsectionProgress
+from .serializers import (
+    CourseSerializer, ModuleSerializer, EnrollmentSerializer, ModuleProgressSerializer,
+    SectionSerializer, SectionCreateSerializer, SubsectionSerializer, SubsectionCreateSerializer,
+    SubsectionProgressSerializer,
+)
 
 
 class CourseListView(generics.ListCreateAPIView):
@@ -104,6 +109,102 @@ class ModuleDetailView(generics.RetrieveUpdateDestroyAPIView):
             return Module.objects.filter(course_id__in=enrolled_courses)
 
 
+# --- Section & Subsection (instructor content management) ---
+
+class SectionListView(generics.ListCreateAPIView):
+    serializer_class = SectionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        return SectionCreateSerializer if self.request.method == 'POST' else SectionSerializer
+
+    def get_queryset(self):
+        course_id = self.request.query_params.get('course_id')
+        if not course_id:
+            return Section.objects.none()
+        course = Course.objects.filter(id=course_id).first()
+        if not course:
+            return Section.objects.none()
+        if self.request.user.is_admin:
+            return Section.objects.filter(course_id=course_id)
+        if self.request.user.is_instructor and course.instructor == self.request.user:
+            return Section.objects.filter(course_id=course_id)
+        if self.request.user.is_student:
+            if Enrollment.objects.filter(student=self.request.user, course=course).exists():
+                return Section.objects.filter(course_id=course_id)
+        return Section.objects.none()
+
+    def perform_create(self, serializer):
+        course_id = self.request.data.get('course')
+        if not course_id:
+            raise serializers.ValidationError("course is required")
+        course = Course.objects.get(id=course_id)
+        if not (self.request.user.is_admin or course.instructor == self.request.user):
+            raise permissions.PermissionDenied("Only course instructor can add sections")
+        serializer.save()
+
+
+class SectionDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = SectionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.is_admin:
+            return Section.objects.all()
+        if self.request.user.is_instructor:
+            return Section.objects.filter(course__instructor=self.request.user)
+        enrolled = Enrollment.objects.filter(student=self.request.user).values_list('course_id', flat=True)
+        return Section.objects.filter(course_id__in=enrolled)
+
+
+class SubsectionListView(generics.ListCreateAPIView):
+    serializer_class = SubsectionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_serializer_class(self):
+        return SubsectionCreateSerializer if self.request.method == 'POST' else SubsectionSerializer
+
+    def get_queryset(self):
+        section_id = self.request.query_params.get('section_id')
+        if not section_id:
+            return Subsection.objects.none()
+        section = Section.objects.filter(id=section_id).first()
+        if not section:
+            return Subsection.objects.none()
+        if self.request.user.is_admin:
+            return Subsection.objects.filter(section_id=section_id)
+        if self.request.user.is_instructor and section.course.instructor == self.request.user:
+            return Subsection.objects.filter(section_id=section_id)
+        if self.request.user.is_student:
+            if Enrollment.objects.filter(student=self.request.user, course=section.course).exists():
+                return Subsection.objects.filter(section_id=section_id)
+        return Subsection.objects.none()
+
+    def perform_create(self, serializer):
+        section_id = self.request.data.get('section')
+        if not section_id:
+            raise serializers.ValidationError("section is required")
+        section = Section.objects.get(id=section_id)
+        if not (self.request.user.is_admin or section.course.instructor == self.request.user):
+            raise permissions.PermissionDenied("Only course instructor can add subsections")
+        serializer.save()
+
+
+class SubsectionDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = SubsectionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        if self.request.user.is_admin:
+            return Subsection.objects.all()
+        if self.request.user.is_instructor:
+            return Subsection.objects.filter(section__course__instructor=self.request.user)
+        enrolled = Enrollment.objects.filter(student=self.request.user).values_list('course_id', flat=True)
+        return Subsection.objects.filter(section__course_id__in=enrolled)
+
+
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def enroll_course(request, course_id):
@@ -171,6 +272,32 @@ def mark_module_complete(request, enrollment_id, module_id):
     return Response(serializer.data)
 
 
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def mark_subsection_complete(request, enrollment_id, subsection_id):
+    try:
+        enrollment = Enrollment.objects.get(id=enrollment_id, student=request.user)
+        subsection = Subsection.objects.get(id=subsection_id, section__course=enrollment.course)
+    except (Enrollment.DoesNotExist, Subsection.DoesNotExist):
+        return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    progress, created = SubsectionProgress.objects.get_or_create(
+        enrollment=enrollment, subsection=subsection
+    )
+    progress.is_completed = True
+    progress.save()
+    total = Subsection.objects.filter(section__course=enrollment.course).count()
+    completed = enrollment.subsection_progress.filter(is_completed=True).count()
+    mod_total = enrollment.course.modules.count()
+    mod_completed = enrollment.module_progress.filter(is_completed=True).count()
+    total_items = total + mod_total
+    completed_items = completed + mod_completed
+    enrollment.progress_percentage = (completed_items / total_items * 100) if total_items > 0 else 0
+    if enrollment.progress_percentage >= 100:
+        enrollment.is_completed = True
+    enrollment.save()
+    return Response(SubsectionProgressSerializer(progress).data)
+
+
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def course_progress(request, course_id):
@@ -181,10 +308,11 @@ def course_progress(request, course_id):
     try:
         enrollment = Enrollment.objects.get(student=request.user, course_id=course_id)
         module_progress = ModuleProgress.objects.filter(enrollment=enrollment)
-        
+        subsection_progress = SubsectionProgress.objects.filter(enrollment=enrollment)
         return Response({
             'enrollment': EnrollmentSerializer(enrollment).data,
-            'module_progress': ModuleProgressSerializer(module_progress, many=True).data
+            'module_progress': ModuleProgressSerializer(module_progress, many=True).data,
+            'subsection_progress': SubsectionProgressSerializer(subsection_progress, many=True).data,
         })
     except Enrollment.DoesNotExist:
         return Response({'error': 'Not enrolled in this course'}, 

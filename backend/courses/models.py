@@ -20,6 +20,37 @@ class Course(models.Model):
         return self.title
 
 
+class Section(models.Model):
+    """Course section (e.g. Week 1, Chapter 1) - groups subsections/lectures."""
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='sections')
+    title = models.CharField(max_length=200)
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+
+    def __str__(self):
+        return f"{self.course.title} - {self.title}"
+
+
+class Subsection(models.Model):
+    """Lecture/content within a section - supports PDF upload."""
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name='subsections')
+    title = models.CharField(max_length=200)
+    order = models.PositiveIntegerField(default=0)
+    pdf_file = models.FileField(upload_to='course_lectures/', blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+
+    def __str__(self):
+        return f"{self.section.title} - {self.title}"
+
+
 class Module(models.Model):
     CONTENT_TYPE_CHOICES = [
         ('video', 'Video'),
@@ -77,4 +108,19 @@ class ModuleProgress(models.Model):
     
     def __str__(self):
         return f"{self.enrollment.student.username} - {self.module.title}"
+
+
+class SubsectionProgress(models.Model):
+    """Tracks student progress through subsections (lectures)."""
+    enrollment = models.ForeignKey(Enrollment, on_delete=models.CASCADE, related_name='subsection_progress')
+    subsection = models.ForeignKey(Subsection, on_delete=models.CASCADE)
+    is_completed = models.BooleanField(default=False)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    last_accessed = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['enrollment', 'subsection']
+
+    def __str__(self):
+        return f"{self.enrollment.student.username} - {self.subsection.title}"
 

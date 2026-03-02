@@ -59,7 +59,6 @@ def _gift_escape(s):
 
 
 def export_gift(questions):
-    """Export questions to GIFT format (Moodle compatible)."""
     lines = []
     for q in questions:
         d = questions_to_dict_list([q])[0]
@@ -71,11 +70,11 @@ def export_gift(questions):
             parts.append(f"{prefix}{_gift_escape(opt)}")
         stmt = d['statement'].replace('{', '\\{').replace('}', '\\}').replace('~', '\\~').replace('=', '\\=')
         line = f"{stmt}{{{' '.join(parts)}}}"
-        if d['explanation'] or d['hint']:
-            line += f"#{d['explanation'] or d['hint'] or ''}"
+        # Write hint first, explanation second — parser reads them in this order
+        line += f"#{_gift_escape(d['hint']) if d['hint'] else ''}"
+        line += f"#{_gift_escape(d['explanation']) if d['explanation'] else ''}"
         lines.append(line)
     return '\n\n'.join(lines)
-
 
 def _xml_escape(s):
     """Escape XML special characters."""
@@ -85,7 +84,6 @@ def _xml_escape(s):
 
 
 def export_xml(questions, quiz_title='Quiz'):
-    """Export questions to Moodle XML format."""
     quiz = ET.Element('quiz')
     for i, q in enumerate(questions):
         d = questions_to_dict_list([q])[0]
@@ -95,15 +93,60 @@ def export_xml(questions, quiz_title='Quiz'):
         qtext = ET.SubElement(quest, 'questiontext', format='html')
         ET.SubElement(qtext, 'text').text = _xml_escape(d['statement'])
         ET.SubElement(quest, 'defaultgrade').text = str(d['marks'])
+        ET.SubElement(quest, 'difficulty').text = d['difficulty']
+        ET.SubElement(quest, 'taxonomy').text = d['taxonomy']
         for j, opt in enumerate(d['options']):
             ans = ET.SubElement(quest, 'answer', fraction='100' if j == d['correct_index'] else '0', format='plain_text')
             ET.SubElement(ans, 'text').text = _xml_escape(opt)
         if d['explanation']:
             fb = ET.SubElement(quest, 'generalfeedback', format='html')
             ET.SubElement(fb, 'text').text = _xml_escape(d['explanation'])
+        if d['hint']:
+            hint_el = ET.SubElement(quest, 'hint', format='html')
+            ET.SubElement(hint_el, 'text').text = _xml_escape(d['hint'])
     rough = ET.tostring(quiz, encoding='unicode')
     return minidom.parseString(f'<?xml version="1.0" encoding="UTF-8"?>{rough}').toprettyxml(indent="  ")
 
+
+def parse_xml(content):
+    root = ET.fromstring(content)
+    questions = []
+    for quest in root.findall('.//question[@type="multichoice"]'):
+        qtext_el = quest.find('questiontext/text')
+        if qtext_el is None or not (qtext_el.text or '').strip():
+            continue
+        stmt = (qtext_el.text or '').strip()
+        opts = []
+        correct_idx = 0
+        for i, ans in enumerate(quest.findall('answer')):
+            text_el = ans.find('text')
+            if text_el is not None and (text_el.text or '').strip():
+                opts.append((text_el.text or '').strip())
+                if ans.get('fraction') == '100':
+                    correct_idx = len(opts) - 1
+        if len(opts) < 2:
+            continue
+        fb_el = quest.find('generalfeedback/text')
+        explanation = (fb_el.text or '').strip() if fb_el is not None else ''
+        hint_el = quest.find('hint/text')
+        hint = (hint_el.text or '').strip() if hint_el is not None else ''
+        grade_el = quest.find('defaultgrade')
+        marks = int(grade_el.text) if grade_el is not None and grade_el.text else 1
+        difficulty_el = quest.find('difficulty')
+        difficulty = (difficulty_el.text or 'medium').strip() if difficulty_el is not None else 'medium'
+        taxonomy_el = quest.find('taxonomy')
+        taxonomy = (taxonomy_el.text or 'understand').strip() if taxonomy_el is not None else 'understand'
+        questions.append({
+            'statement': stmt,
+            'options': opts,
+            'correct_index': min(correct_idx, len(opts) - 1),
+            'explanation': explanation,
+            'hint': hint,
+            'marks': max(1, marks),
+            'difficulty': difficulty,
+            'taxonomy': taxonomy,
+        })
+    return questions
 
 def parse_csv(content):
     """Parse CSV content into list of question dicts."""
@@ -129,14 +172,13 @@ def parse_csv(content):
 
 
 def parse_gift(content):
-    """Parse GIFT content into list of question dicts."""
     questions = []
     blocks = re.split(r'\n\s*\n', content)
     for block in blocks:
         block = block.strip()
         if not block or block.startswith('//'):
             continue
-        m = re.match(r'^(.+?)\{(.+)\}(?:\#(.+?))?(?:\#(.+?))?$', block, re.DOTALL)
+        m = re.match(r'^(.+?)\{(.+?)\}#?([^#]*)#?(.*)$', block, re.DOTALL)
         if not m:
             continue
         stmt, opts_str, hint, explanation = m.groups()
@@ -158,8 +200,8 @@ def parse_gift(content):
             'statement': stmt,
             'options': opts,
             'correct_index': correct_idx,
-            'explanation': (explanation or '').strip(),
-            'hint': (hint or '').strip(),
+            'explanation': explanation.strip(),
+            'hint': hint.strip(),
             'marks': 1,
             'difficulty': 'medium',
             'taxonomy': 'understand',
@@ -167,40 +209,40 @@ def parse_gift(content):
     return questions
 
 
-def parse_xml(content):
-    """Parse Moodle XML content into list of question dicts."""
-    root = ET.fromstring(content)
-    questions = []
-    for quest in root.findall('.//question[@type="multichoice"]'):
-        qtext_el = quest.find('questiontext/text')
-        if qtext_el is None or not (qtext_el.text or '').strip():
-            continue
-        stmt = (qtext_el.text or '').strip()
-        opts = []
-        correct_idx = 0
-        for i, ans in enumerate(quest.findall('answer')):
-            text_el = ans.find('text')
-            if text_el is not None and (text_el.text or '').strip():
-                opts.append((text_el.text or '').strip())
-                if ans.get('fraction') == '100':
-                    correct_idx = len(opts) - 1
-        if len(opts) < 2:
-            continue
-        fb_el = quest.find('generalfeedback/text')
-        explanation = (fb_el.text or '').strip() if fb_el is not None else ''
-        grade_el = quest.find('defaultgrade')
-        marks = int(grade_el.text) if grade_el is not None and grade_el.text else 1
-        questions.append({
-            'statement': stmt,
-            'options': opts,
-            'correct_index': min(correct_idx, len(opts) - 1),
-            'explanation': explanation,
-            'hint': '',
-            'marks': max(1, marks),
-            'difficulty': 'medium',
-            'taxonomy': 'understand',
-        })
-    return questions
+# def parse_xml(content):
+#     """Parse Moodle XML content into list of question dicts."""
+#     root = ET.fromstring(content)
+#     questions = []
+#     for quest in root.findall('.//question[@type="multichoice"]'):
+#         qtext_el = quest.find('questiontext/text')
+#         if qtext_el is None or not (qtext_el.text or '').strip():
+#             continue
+#         stmt = (qtext_el.text or '').strip()
+#         opts = []
+#         correct_idx = 0
+#         for i, ans in enumerate(quest.findall('answer')):
+#             text_el = ans.find('text')
+#             if text_el is not None and (text_el.text or '').strip():
+#                 opts.append((text_el.text or '').strip())
+#                 if ans.get('fraction') == '100':
+#                     correct_idx = len(opts) - 1
+#         if len(opts) < 2:
+#             continue
+#         fb_el = quest.find('generalfeedback/text')
+#         explanation = (fb_el.text or '').strip() if fb_el is not None else ''
+#         grade_el = quest.find('defaultgrade')
+#         marks = int(grade_el.text) if grade_el is not None and grade_el.text else 1
+#         questions.append({
+#             'statement': stmt,
+#             'options': opts,
+#             'correct_index': min(correct_idx, len(opts) - 1),
+#             'explanation': explanation,
+#             'hint': '',
+#             'marks': max(1, marks),
+#             'difficulty': 'medium',
+#             'taxonomy': 'understand',
+#         })
+#     return questions
 
 
 def parse_import_file(content, format_type):

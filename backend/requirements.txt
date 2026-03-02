@@ -11,3 +11,4 @@ setuptools==69.5.1
 openai>=1.0.0
 pypdf>=3.0.0
 ollama==0.6.1
+google-generativeai>=0.8.0

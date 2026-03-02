@@ -77,6 +77,70 @@ def build_rag_context(lecture_contents, max_chars=8000):
     return combined
 
 
+def generate_chat_reply_with_fallback(message, lecture_contents=None):
+    """
+    Chat with optional context extracted from uploaded files.
+    Tries Gemini first (if configured), falls back to local Ollama streaming.
+    """
+    import os
+    lecture_contents = lecture_contents or []
+    context = build_rag_context(lecture_contents, max_chars=8000)
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-pro")
+            prompt = f"""You are a helpful course assistant.
+
+CONTEXT (from user uploaded files, may be empty):
+{context}
+
+USER MESSAGE:
+{message}
+
+Answer clearly and concisely. If the context is insufficient, say what is missing."""
+            logger.info("[Gemini][Chat] Calling Gemini")
+            resp = model.generate_content(prompt)
+            text = getattr(resp, "text", None)
+            if not text and getattr(resp, "candidates", None):
+                try:
+                    text = resp.candidates[0].content.parts[0].text
+                except Exception:
+                    text = ""
+            if text and text.strip():
+                return text.strip()
+            logger.warning("[Gemini][Chat] Empty response, falling back to Ollama")
+        except Exception as e:
+            logger.warning("[Gemini][Chat] Gemini failed, falling back to Ollama: %s", e)
+
+    # Fallback: local Ollama
+    try:
+        import ollama
+        client = ollama.Client(host="http://localhost:11434")
+    except Exception as e:
+        raise ValueError(f"Neither Gemini nor Ollama is available. Ollama error: {e}")
+
+    system_prompt = "You are a helpful course assistant. Use the provided context when relevant."
+    user_prompt = f"""CONTEXT:
+{context}
+
+USER MESSAGE:
+{message}
+"""
+    return _call_ollama_streaming(
+        client=client,
+        model="llama3.2:3b",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        options={"temperature": 0.3, "num_predict": 800},
+        timeout_seconds=300,
+    ).strip()
+
+
 # ---------------------------------------------------------
 # SAFE JSON PARSING
 # ---------------------------------------------------------
@@ -116,7 +180,7 @@ def safe_json_load(text):
 # ---------------------------------------------------------
 # OLLAMA STREAMING CALL WITH TIMEOUT WATCHDOG
 # ---------------------------------------------------------
-def _call_ollama_streaming(client, model, messages, options, timeout_seconds=240):
+def _call_ollama_streaming(client, model, messages, options, timeout_seconds=300):
     """
     Call ollama with streaming so we get real-time token output.
     A watchdog thread prints status and raises an error if no tokens arrive
@@ -328,7 +392,7 @@ Examples:
                 model="llama3.2:3b",
                 messages=[{"role": "user", "content": user_prompt}],
                 options={"temperature": 0.5, "num_predict": 1500},
-                timeout_seconds=240
+                timeout_seconds=300
             )
             logger.info("[LLM] Response content length: %d, preview: %s", len(content), content[:200])
             print(f"[LLM] Response preview: {content[:300]}")
@@ -359,7 +423,9 @@ Examples:
     else:
         logger.error("[LLM] No valid JSON after %d retries", max_retries)
         print(f"[LLM] No valid JSON after {max_retries} retries")
-        raise ValueError("Llama3 did not return valid JSON after retries.")
+        # Graceful fallback: return no questions instead of raising,
+        # so API callers can handle this as "no results" rather than a server error.
+        return []
 
     questions = []
     for i, q in enumerate(raw):
@@ -371,6 +437,12 @@ Examples:
         opts = [str(o).strip() for o in opts if str(o).strip()]
         if len(opts) > 4:
             opts = opts[:4]
+        if not opts:
+            continue
+        try:
+            marks_val = int(q.get("marks", 1))
+        except Exception:
+            marks_val = 1
         correct_idx = int(q.get("correct_index", 0)) % len(opts)
         questions.append({
             "statement": str(q.get("statement", "")).strip() or f"Question {i+1}",
@@ -378,13 +450,90 @@ Examples:
             "correct_index": correct_idx,
             "explanation": str(q.get("explanation", "")).strip(),
             "hint": str(q.get("hint", "")).strip(),
-            "marks": max(1, min(5, int(q.get("marks", 1)))),
+            "marks": max(1, min(5, marks_val)),
             "difficulty": q.get("difficulty") if q.get("difficulty") in ("easy", "medium", "hard") else "medium",
             "taxonomy": q.get("taxonomy") if q.get("taxonomy") in ("remember", "understand", "apply", "analyze", "evaluate", "create") else "understand",
         })
 
     print(f"[LLM] Successfully built {len(questions)} questions.")
     return questions[:num_questions]
+
+
+def generate_questions_with_fallback(lecture_contents, num_questions=5, chunk_size=1500):
+    """
+    Try Gemini API first; if it fails or no key, fall back to local Ollama.
+    """
+    import os
+    num_questions = max(1, min(15, int(num_questions)))
+
+    context = build_rag_context(lecture_contents, max_chars=8000)
+    if not context.strip():
+        raise ValueError("No lecture content provided")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-pro")
+            prompt = f"""Generate exactly {num_questions} multiple-choice questions from this lecture content.
+
+LECTURE CONTENT:
+{context}
+
+RULES:
+1. Output ONLY a valid JSON array. No other text.
+2. Each object: "statement", "options" (array of 4 strings, correct first), "correct_index" (0-3), "explanation", "hint", "marks" (1-5), "difficulty" (easy/medium/hard), "taxonomy" (remember/understand/apply/analyze/evaluate/create).
+3. Distractors must be plausible. Do not repeat lecture titles in statements.
+4. Vary difficulty and taxonomy.
+"""
+            logger.info("[Gemini] Calling Gemini for question generation")
+            resp = model.generate_content(prompt)
+            text = getattr(resp, "text", None)
+            if not text and getattr(resp, "candidates", None):
+                try:
+                    text = resp.candidates[0].content.parts[0].text
+                except Exception:
+                    text = ""
+            logger.info("[Gemini] Raw response length: %d", len(text or ""))
+            raw = safe_json_load(text)
+            if raw and isinstance(raw, list):
+                logger.info("[Gemini] Parsed %d questions from Gemini", len(raw))
+                # Reuse same normalization logic
+                questions = []
+                for i, q in enumerate(raw):
+                    if not isinstance(q, dict):
+                        continue
+                    opts = q.get("options", [])
+                    if not isinstance(opts, list) or len(opts) < 2:
+                        continue
+                    opts = [str(o).strip() for o in opts if str(o).strip()]
+                    if len(opts) > 4:
+                        opts = opts[:4]
+                    if not opts:
+                        continue
+                    try:
+                        marks_val = int(q.get("marks", 1))
+                    except Exception:
+                        marks_val = 1
+                    correct_idx = int(q.get("correct_index", 0)) % len(opts)
+                    questions.append({
+                        "statement": str(q.get("statement", "")).strip() or f"Question {i+1}",
+                        "options": opts,
+                        "correct_index": correct_idx,
+                        "explanation": str(q.get("explanation", "")).strip(),
+                        "hint": str(q.get("hint", "")).strip(),
+                        "marks": max(1, min(5, marks_val)),
+                        "difficulty": q.get("difficulty") if q.get("difficulty") in ("easy", "medium", "hard") else "medium",
+                        "taxonomy": q.get("taxonomy") if q.get("taxonomy") in ("remember", "understand", "apply", "analyze", "evaluate", "create") else "understand",
+                    })
+                return questions[:num_questions]
+            logger.warning("[Gemini] Could not parse valid JSON from Gemini response, falling back to Ollama")
+        except Exception as e:
+            logger.warning("[Gemini] Gemini generation failed, falling back to Ollama: %s", e)
+
+    # Fallback to local Ollama
+    return generate_questions_from_content(lecture_contents, num_questions=num_questions, chunk_size=chunk_size)
 
 
 # # -------------------------------

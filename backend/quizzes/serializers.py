@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import Quiz, Question, Choice, QuizAttempt, Answer
+from .models import (
+    Quiz, Question, Choice, QuizAttempt, Answer,
+    ChatSession, ChatMessage, PracticeSession,
+)
 from courses.serializers import CourseSerializer
 from accounts.serializers import UserSerializer
 
@@ -88,4 +91,60 @@ class QuizSubmissionSerializer(serializers.Serializer):
             child=serializers.IntegerField()
         )
     )
+
+
+class ChatMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ChatMessage
+        fields = ['id', 'role', 'content', 'created_at']
+        read_only_fields = fields
+
+
+class ChatSessionSerializer(serializers.ModelSerializer):
+    last_message = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ChatSession
+        fields = ['id', 'title', 'course', 'created_at', 'updated_at', 'last_message']
+        read_only_fields = fields
+
+    def get_last_message(self, obj):
+        msg = obj.messages.order_by('-created_at').first()
+        if not msg:
+            return None
+        return {
+            'role': msg.role,
+            'content': msg.content[:120],
+            'created_at': msg.created_at,
+        }
+
+
+class ChatSessionDetailSerializer(serializers.ModelSerializer):
+    messages = ChatMessageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ChatSession
+        fields = ['id', 'title', 'course', 'created_at', 'updated_at', 'messages']
+        read_only_fields = fields
+
+
+class PracticeSessionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PracticeSession
+        fields = [
+            'id', 'course', 'created_at', 'completed_at',
+            'num_questions', 'num_correct', 'duration_seconds',
+        ]
+        read_only_fields = fields
+
+
+class PracticeSessionDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PracticeSession
+        fields = [
+            'id', 'course', 'created_at', 'completed_at',
+            'num_questions', 'num_correct', 'duration_seconds',
+            'data',
+        ]
+        read_only_fields = fields
 

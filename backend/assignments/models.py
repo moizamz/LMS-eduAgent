@@ -7,6 +7,7 @@ class Assignment(models.Model):
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='assignments')
     title = models.CharField(max_length=200)
     description = models.TextField()
+    instruction_file = models.FileField(upload_to='assignment_instructions/', blank=True, null=True)
     due_date = models.DateTimeField()
     max_score = models.PositiveIntegerField(default=100)
     created_at = models.DateTimeField(auto_now_add=True)

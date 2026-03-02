@@ -32,6 +32,7 @@ import {
   ListItemIcon,
   Collapse,
   Menu,
+  Paper,
 } from '@mui/material';
 import {
   PlayArrow, Description, Link as LinkIcon, TextFields,
@@ -88,11 +89,46 @@ const CourseDetail = () => {
   const [viewingPdf, setViewingPdf] = useState(null);
   const [viewingPdfBlobUrl, setViewingPdfBlobUrl] = useState(null);
   const [enrollment, setEnrollment] = useState(null);
+  const [assignments, setAssignments] = useState([]);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(false);
+  const [assignmentDialogOpen, setAssignmentDialogOpen] = useState(false);
+  const [assignmentForm, setAssignmentForm] = useState({
+    title: '',
+    description: '',
+    due_date: '',
+    max_score: 100,
+    instruction_file: null,
+  });
+  const [assignmentSubmissionsOpen, setAssignmentSubmissionsOpen] = useState(false);
+  const [assignmentSubmissionsLoading, setAssignmentSubmissionsLoading] = useState(false);
+  const [assignmentSubmissions, setAssignmentSubmissions] = useState([]);
+  const [assignmentSubmissionsAssignment, setAssignmentSubmissionsAssignment] = useState(null);
+
+  // Chat tab
+  const [chatFiles, setChatFiles] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatMessages, setChatMessages] = useState([]); // {role:'user'|'assistant', content:string}
+  const [chatSending, setChatSending] = useState(false);
+  const [chatSessions, setChatSessions] = useState([]);
+  const [currentChatId, setCurrentChatId] = useState(null);
+
+  // Practice tab (student)
+  const [practiceSelectedLectureIds, setPracticeSelectedLectureIds] = useState([]);
+  const [practiceNumQuestions, setPracticeNumQuestions] = useState(5);
+  const [practiceLoading, setPracticeLoading] = useState(false);
+  const [practiceQuestions, setPracticeQuestions] = useState([]);
+  const [practiceIndex, setPracticeIndex] = useState(0);
+  const [practiceSelectedChoice, setPracticeSelectedChoice] = useState(null);
+  const [practiceChecked, setPracticeChecked] = useState(false);
+  const [practiceShowHint, setPracticeShowHint] = useState(false);
+  const [practiceWasCorrect, setPracticeWasCorrect] = useState(null);
 
   useEffect(() => {
     fetchCourse();
     checkEnrollment();
     fetchQuizzes();
+    fetchAssignments();
+    fetchChatSessions();
   }, [id]);
 
   const fetchCourse = async () => {
@@ -144,6 +180,110 @@ const CourseDetail = () => {
       console.error('Error fetching quizzes:', error);
     } finally {
       setQuizLoading(false);
+    }
+  };
+
+  const fetchAssignments = async () => {
+    try {
+      setAssignmentsLoading(true);
+      const res = await api.get('/assignments/', { params: { course_id: id } });
+      const data = Array.isArray(res.data) ? res.data : res.data.results || [];
+      setAssignments(data);
+    } catch (error) {
+      console.error('Error fetching assignments:', error);
+      toast.error('Failed to load assignments');
+    } finally {
+      setAssignmentsLoading(false);
+    }
+  };
+
+  const fetchChatSessions = async () => {
+    try {
+      const res = await api.get('/quizzes/chat-sessions/');
+      setChatSessions(Array.isArray(res.data) ? res.data : []);
+    } catch (e) {
+      console.error('Failed to load chat sessions', e);
+    }
+  };
+
+  const handleViewAssignmentSubmissions = async (assignment) => {
+    try {
+      setAssignmentSubmissionsAssignment(assignment);
+      setAssignmentSubmissionsOpen(true);
+      setAssignmentSubmissionsLoading(true);
+      const res = await api.get(`/assignments/${assignment.id}/submissions/`);
+      setAssignmentSubmissions(Array.isArray(res.data) ? res.data : []);
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to load submissions');
+    } finally {
+      setAssignmentSubmissionsLoading(false);
+    }
+  };
+
+  const handleSendChat = async () => {
+    if (!chatInput.trim()) return;
+    const msg = chatInput.trim();
+    setChatMessages((prev) => [...prev, { role: 'user', content: msg }]);
+    setChatInput('');
+    setChatSending(true);
+    try {
+      const form = new FormData();
+      form.append('message', msg);
+      form.append('course_id', String(id));
+      if (currentChatId) {
+        form.append('session_id', currentChatId);
+      }
+      chatFiles.forEach((f) => form.append('files', f));
+      const res = await api.post('/quizzes/chat/', form);
+      const reply = res.data.reply || '';
+      const session = res.data.session;
+      setChatMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      if (session) {
+        setCurrentChatId(session.id);
+        setChatSessions((prev) => {
+          const others = prev.filter((s) => s.id !== session.id);
+          return [session, ...others];
+        });
+      }
+    } catch (e) {
+      console.error('Chat error', e);
+      toast.error(e.response?.data?.error || 'Chat failed');
+    } finally {
+      setChatSending(false);
+    }
+  };
+
+  const handleGeneratePractice = async () => {
+    if (!practiceSelectedLectureIds.length) {
+      toast.error('Select at least one PDF lecture');
+      return;
+    }
+    setPracticeLoading(true);
+    setPracticeQuestions([]);
+    setPracticeIndex(0);
+    setPracticeSelectedChoice(null);
+    setPracticeChecked(false);
+    setPracticeShowHint(false);
+    setPracticeWasCorrect(null);
+    try {
+      const res = await api.post('/quizzes/generate-questions/', {
+        timeout: 360000, 
+        subsection_ids: practiceSelectedLectureIds,
+        num_questions: practiceNumQuestions,
+      });
+      const qs = res.data.questions || [];
+      if (!qs.length) {
+        toast.error('No questions generated');
+        return;
+      }
+      setPracticeQuestions(qs);
+      toast.success(`Generated ${qs.length} practice questions`);
+    } catch (e) {
+      console.error('[Practice] Error generating questions:', e);
+      console.error('[Practice] Response:', e?.response?.data);
+      toast.error(e?.response?.data?.error || e?.message || 'Failed to generate practice questions');
+    } finally {
+      setPracticeLoading(false);
     }
   };
 
@@ -721,6 +861,8 @@ const CourseDetail = () => {
           <Tab label="Assignments" />
           <Tab label="Quizzes" />
           <Tab label="Discussions" />
+          <Tab label="Chat" />
+          <Tab label="Practice" />
         </Tabs>
       </Box>
 
@@ -1036,14 +1178,557 @@ const CourseDetail = () => {
       )}
 
       {tabValue === 1 && (
+        <>
+          <Card sx={{ mb: 2 }}>
+            <CardContent>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6" gutterBottom>
+                  Assignments
+                </Typography>
+                {isInstructorOrAdmin && (
+                  <Button
+                    variant="contained"
+                    startIcon={<Add />}
+                    onClick={() => {
+                      setAssignmentForm({
+                        title: '',
+                        description: '',
+                        due_date: '',
+                        max_score: 100,
+                        instruction_file: null,
+                      });
+                      setAssignmentDialogOpen(true);
+                    }}
+                  >
+                    Create Assignment
+                  </Button>
+                )}
+              </Box>
+              {assignmentsLoading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                  <CircularProgress size={24} />
+                </Box>
+              ) : assignments.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">
+                  No assignments for this course.
+                </Typography>
+              ) : (
+                <List>
+                  {assignments.map((a) => (
+                    <ListItem key={a.id} divider>
+                      <ListItemText
+                        primary={a.title}
+                        secondary={
+                          <>
+                            <Typography variant="body2" color="text.secondary">
+                              {a.description}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              Due: {a.due_date ? new Date(a.due_date).toLocaleString() : 'Not set'} · Max score: {a.max_score}
+                            </Typography>
+                          </>
+                        }
+                      />
+                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                        {a.instruction_file_url && (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<GetApp />}
+                            component="a"
+                            href={a.instruction_file_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            download
+                          >
+                            Instructions
+                          </Button>
+                        )}
+                        {user?.role === 'student' && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            component="label"
+                          >
+                            Submit
+                            <input
+                              type="file"
+                              hidden
+                              onChange={async (e) => {
+                                const f = e.target.files?.[0];
+                                if (!f) return;
+                                const formData = new FormData();
+                                formData.append('submission_file', f);
+                                try {
+                                  await api.post(`/assignments/${a.id}/submit/`, formData);
+                                  toast.success('Assignment submitted');
+                                } catch (err) {
+                                  toast.error(err.response?.data?.error || 'Submission failed');
+                                } finally {
+                                  e.target.value = '';
+                                }
+                              }}
+                            />
+                          </Button>
+                        )}
+                        {isInstructorOrAdmin && (
+                          <Button size="small" variant="outlined" onClick={() => handleViewAssignmentSubmissions(a)}>
+                            View submissions
+                          </Button>
+                        )}
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Create Assignment Dialog for instructors */}
+          <Dialog
+            open={assignmentDialogOpen}
+            onClose={() => setAssignmentDialogOpen(false)}
+            maxWidth="sm"
+            fullWidth
+          >
+            <DialogTitle>Create Assignment</DialogTitle>
+            <DialogContent>
+              <TextField
+                fullWidth
+                label="Title"
+                margin="normal"
+                value={assignmentForm.title}
+                onChange={(e) => setAssignmentForm((p) => ({ ...p, title: e.target.value }))}
+              />
+              <TextField
+                fullWidth
+                label="Description"
+                margin="normal"
+                multiline
+                rows={3}
+                value={assignmentForm.description}
+                onChange={(e) => setAssignmentForm((p) => ({ ...p, description: e.target.value }))}
+              />
+              <TextField
+                fullWidth
+                type="datetime-local"
+                label="Due date"
+                margin="normal"
+                InputLabelProps={{ shrink: true }}
+                value={assignmentForm.due_date}
+                onChange={(e) => setAssignmentForm((p) => ({ ...p, due_date: e.target.value }))}
+              />
+              <TextField
+                fullWidth
+                type="number"
+                label="Max score"
+                margin="normal"
+                value={assignmentForm.max_score}
+                onChange={(e) => setAssignmentForm((p) => ({ ...p, max_score: Number(e.target.value) || 100 }))}
+              />
+              <Box sx={{ mt: 2 }}>
+                <Button
+                  component="label"
+                  variant="outlined"
+                  startIcon={<UploadFile />}
+                  fullWidth
+                >
+                  {assignmentForm.instruction_file ? assignmentForm.instruction_file.name : 'Upload instructions PDF (optional)'}
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    hidden
+                    onChange={(e) => {
+                      const f = e.target.files?.[0] || null;
+                      setAssignmentForm((p) => ({ ...p, instruction_file: f }));
+                    }}
+                  />
+                </Button>
+              </Box>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setAssignmentDialogOpen(false)}>Cancel</Button>
+              <Button
+                variant="contained"
+                onClick={async () => {
+                  if (!assignmentForm.title.trim()) {
+                    toast.error('Assignment title is required');
+                    return;
+                  }
+                  if (!assignmentForm.due_date) {
+                    toast.error('Due date is required');
+                    return;
+                  }
+                  const formData = new FormData();
+                  formData.append('title', assignmentForm.title);
+                  formData.append('description', assignmentForm.description);
+                  if (assignmentForm.due_date) {
+                    formData.append('due_date', assignmentForm.due_date);
+                  }
+                  formData.append('max_score', String(assignmentForm.max_score || 100));
+                  formData.append('course_id', String(id));
+                  if (assignmentForm.instruction_file) {
+                    formData.append('instruction_file', assignmentForm.instruction_file);
+                  }
+                  try {
+                    await api.post('/assignments/', formData);
+                    toast.success('Assignment created');
+                    setAssignmentDialogOpen(false);
+                    fetchAssignments();
+                  } catch (err) {
+                    toast.error(err.response?.data?.error || 'Failed to create assignment');
+                  }
+                }}
+              >
+                Create
+              </Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* Assignment submissions dialog (instructor) */}
+          <Dialog
+            open={assignmentSubmissionsOpen}
+            onClose={() => { setAssignmentSubmissionsOpen(false); setAssignmentSubmissions([]); setAssignmentSubmissionsAssignment(null); }}
+            maxWidth="md"
+            fullWidth
+          >
+            <DialogTitle>
+              Submissions {assignmentSubmissionsAssignment ? `— ${assignmentSubmissionsAssignment.title}` : ''}
+            </DialogTitle>
+            <DialogContent dividers>
+              {assignmentSubmissionsLoading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                  <CircularProgress size={24} />
+                </Box>
+              ) : assignmentSubmissions.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">No submissions yet.</Typography>
+              ) : (
+                <List>
+                  {assignmentSubmissions.map((s) => (
+                    <ListItem key={s.id} divider>
+                      <ListItemText
+                        primary={`${s.student?.first_name || ''} ${s.student?.last_name || ''}`.trim() || s.student?.username || 'Student'}
+                        secondary={`Submitted: ${s.submitted_at ? new Date(s.submitted_at).toLocaleString() : '—'}`}
+                      />
+                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                        {s.submission_file && (
+                          <Button size="small" variant="outlined" component="a" href={s.submission_file} target="_blank" rel="noopener noreferrer">
+                            Download
+                          </Button>
+                        )}
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => { setAssignmentSubmissionsOpen(false); setAssignmentSubmissions([]); setAssignmentSubmissionsAssignment(null); }}>Close</Button>
+            </DialogActions>
+          </Dialog>
+        </>
+      )}
+
+      {tabValue === 4 && (
+        <Card>
+          <CardContent sx={{ display: 'flex', gap: 2, minHeight: 420 }}>
+            {/* Left: sessions list */}
+            <Box sx={{ width: 260, borderRight: 1, borderColor: 'divider', pr: 2, display: 'flex', flexDirection: 'column' }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                <Typography variant="subtitle1">Chats</Typography>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setCurrentChatId(null);
+                    setChatMessages([]);
+                    setChatFiles([]);
+                  }}
+                >
+                  New
+                </Button>
+              </Box>
+              <List dense sx={{ flex: 1, overflowY: 'auto' }}>
+                {chatSessions.length === 0 ? (
+                  <ListItem>
+                    <ListItemText
+                      primary={
+                        <Typography variant="body2" color="text.secondary">
+                          No chats yet.
+                        </Typography>
+                      }
+                    />
+                  </ListItem>
+                ) : (
+                  chatSessions.map((s) => (
+                    <ListItem
+                      key={s.id}
+                      button
+                      selected={s.id === currentChatId}
+                      onClick={async () => {
+                        try {
+                          const res = await api.get(`/quizzes/chat-sessions/${s.id}/`);
+                          const msgs = (res.data.messages || []).map((m) => ({
+                            role: m.role,
+                            content: m.content,
+                          }));
+                          setCurrentChatId(s.id);
+                          setChatMessages(msgs);
+                        } catch (e) {
+                          toast.error(e.response?.data?.error || 'Failed to load chat');
+                        }
+                      }}
+                    >
+                      <ListItemText
+                        primary={s.title || 'Chat'}
+                        secondary={s.last_message?.content || ''}
+                        primaryTypographyProps={{ noWrap: true }}
+                        secondaryTypographyProps={{ noWrap: true }}
+                      />
+                    </ListItem>
+                  ))
+                )}
+              </List>
+            </Box>
+
+            {/* Right: conversation */}
+            <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+              <Typography variant="h6" gutterBottom>Chat</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Upload files once per chat. Gemini is tried first; if it fails, the local LLM is used.
+              </Typography>
+
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
+                <Button component="label" variant="outlined" startIcon={<UploadFile />}>
+                  Upload files
+                  <input
+                    type="file"
+                    hidden
+                    multiple
+                    accept=".pdf,.txt,.md"
+                    onChange={(e) => {
+                      const files = Array.from(e.target.files || []);
+                      if (files.length) setChatFiles((prev) => [...prev, ...files]);
+                      e.target.value = '';
+                    }}
+                  />
+                </Button>
+                {chatFiles.length > 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    Files: {chatFiles.map((f) => f.name).join(', ')}
+                  </Typography>
+                )}
+                {chatFiles.length > 0 && (
+                  <Button size="small" color="error" onClick={() => setChatFiles([])}>Clear files</Button>
+                )}
+              </Box>
+
+              <Paper variant="outlined" sx={{ p: 2, flex: 1, overflowY: 'auto', mb: 2 }}>
+                {chatMessages.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    Ask a question about your course or uploaded files.
+                  </Typography>
+                ) : (
+                  chatMessages.map((m, idx) => (
+                    <Box
+                      key={idx}
+                      sx={{
+                        display: 'flex',
+                        justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start',
+                        mb: 1.5,
+                      }}
+                    >
+                      <Box
+                        sx={{
+                          maxWidth: '75%',
+                          px: 1.5,
+                          py: 1,
+                          borderRadius: 2,
+                          bgcolor: m.role === 'user' ? '#7c3aed' : '#f3f4f6',
+                          color: m.role === 'user' ? '#fff' : 'inherit',
+                        }}
+                      >
+                        <Typography
+                          variant="caption"
+                          sx={{ display: 'block', mb: 0.5, opacity: 0.8 }}
+                        >
+                          {m.role === 'user' ? 'You' : 'Assistant'}
+                        </Typography>
+                        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                          {m.content}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  ))
+                )}
+              </Paper>
+
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <TextField
+                  fullWidth
+                  placeholder="Type a message..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (!chatSending) handleSendChat();
+                    }
+                  }}
+                />
+                <Button variant="contained" disabled={chatSending || !chatInput.trim()} onClick={handleSendChat}>
+                  {chatSending ? 'Sending...' : 'Send'}
+                </Button>
+              </Box>
+            </Box>
+          </CardContent>
+        </Card>
+      )}
+
+      {tabValue === 5 && (
         <Card>
           <CardContent>
-            <Typography variant="h6" gutterBottom>
-              Assignments
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Assignment list will be displayed here
-            </Typography>
+            <Typography variant="h6" gutterBottom>Practice</Typography>
+            {user?.role !== 'student' ? (
+              <Typography variant="body2" color="text.secondary">Practice is available for students.</Typography>
+            ) : (
+              <>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Select lecture PDFs, generate questions, then attempt them one by one with hints and instant explanations.
+                </Typography>
+
+                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', mb: 2 }}>
+                  <FormControl sx={{ minWidth: 280 }} size="small">
+                    <InputLabel>Select lectures</InputLabel>
+                    <Select
+                      multiple
+                      value={practiceSelectedLectureIds}
+                      label="Select lectures"
+                      renderValue={(selected) => {
+                        const lectures = getAvailableLectures();
+                        return lectures
+                          .filter((l) => selected.includes(l.id))
+                          .map((l) => l.title)
+                          .join(', ');
+                      }}
+                      onChange={(e) => setPracticeSelectedLectureIds(e.target.value)}
+                    >
+                      {getAvailableLectures().map((sub) => (
+                        <MenuItem key={sub.id} value={sub.id}>
+                          <Checkbox checked={practiceSelectedLectureIds.includes(sub.id)} />
+                          <ListItemText primary={`${sub.sectionTitle}: ${sub.title}`} />
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+
+                  <TextField
+                    label="Questions"
+                    type="number"
+                    size="small"
+                    sx={{ width: 140 }}
+                    value={practiceNumQuestions}
+                    onChange={(e) => setPracticeNumQuestions(Math.max(1, Math.min(15, Number(e.target.value) || 5)))}
+                  />
+
+                  <Button variant="contained" startIcon={<AutoAwesome />} disabled={practiceLoading} onClick={handleGeneratePractice}>
+                    {practiceLoading ? 'Generating...' : 'Generate'}
+                  </Button>
+                </Box>
+
+                {practiceQuestions.length > 0 && (
+                  <Card variant="outlined" sx={{ p: 2 }}>
+                    <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                      Question {practiceIndex + 1} of {practiceQuestions.length}
+                    </Typography>
+                    <Typography variant="subtitle1" sx={{ mb: 1 }}>
+                      {practiceQuestions[practiceIndex]?.statement}
+                    </Typography>
+
+                    {practiceQuestions[practiceIndex]?.hint && (
+                      <Box sx={{ mb: 1 }}>
+                        <Button size="small" startIcon={<Lightbulb />} onClick={() => setPracticeShowHint((v) => !v)}>
+                          {practiceShowHint ? 'Hide hint' : 'Show hint'}
+                        </Button>
+                        <Collapse in={practiceShowHint}>
+                          <Typography variant="body2" sx={{ p: 1, backgroundColor: '#fff8e1', borderRadius: 1, mt: 0.5 }}>
+                            {practiceQuestions[practiceIndex]?.hint}
+                          </Typography>
+                        </Collapse>
+                      </Box>
+                    )}
+
+                    <RadioGroup
+                      value={practiceSelectedChoice ?? ''}
+                      onChange={(e) => setPracticeSelectedChoice(Number(e.target.value))}
+                    >
+                      {(practiceQuestions[practiceIndex]?.options || []).map((opt, idx) => (
+                        <FormControlLabel key={idx} value={idx} control={<Radio />} label={opt} />
+                      ))}
+                    </RadioGroup>
+
+                    {practiceChecked && (
+                      <Box sx={{ mt: 1, p: 1.5, borderRadius: 1, backgroundColor: practiceWasCorrect ? '#e8f5e9' : '#ffebee' }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {practiceWasCorrect ? 'Correct' : 'Incorrect'} — Correct answer: {practiceQuestions[practiceIndex]?.options?.[practiceQuestions[practiceIndex]?.correct_index]}
+                        </Typography>
+                        {practiceQuestions[practiceIndex]?.explanation && (
+                          <Typography variant="body2" sx={{ mt: 0.5 }}>
+                            Explanation: {practiceQuestions[practiceIndex]?.explanation}
+                          </Typography>
+                        )}
+                      </Box>
+                    )}
+
+                    <Box sx={{ display: 'flex', gap: 1, mt: 2, justifyContent: 'space-between' }}>
+                      <Button
+                        disabled={practiceIndex === 0}
+                        onClick={() => {
+                          setPracticeIndex((i) => Math.max(0, i - 1));
+                          setPracticeSelectedChoice(null);
+                          setPracticeChecked(false);
+                          setPracticeShowHint(false);
+                          setPracticeWasCorrect(null);
+                        }}
+                      >
+                        Previous
+                      </Button>
+
+                      {!practiceChecked ? (
+                        <Button
+                          variant="contained"
+                          disabled={practiceSelectedChoice === null}
+                          onClick={() => {
+                            const q = practiceQuestions[practiceIndex];
+                            const isCorrect = Number(practiceSelectedChoice) === Number(q.correct_index);
+                            setPracticeWasCorrect(isCorrect);
+                            setPracticeChecked(true);
+                          }}
+                        >
+                          Check answer
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="contained"
+                          onClick={() => {
+                            if (practiceIndex < practiceQuestions.length - 1) {
+                              setPracticeIndex((i) => i + 1);
+                              setPracticeSelectedChoice(null);
+                              setPracticeChecked(false);
+                              setPracticeShowHint(false);
+                              setPracticeWasCorrect(null);
+                            } else {
+                              toast.success('Practice complete');
+                            }
+                          }}
+                        >
+                          {practiceIndex < practiceQuestions.length - 1 ? 'Next' : 'Finish'}
+                        </Button>
+                      )}
+                    </Box>
+                  </Card>
+                )}
+              </>
+            )}
           </CardContent>
         </Card>
       )}

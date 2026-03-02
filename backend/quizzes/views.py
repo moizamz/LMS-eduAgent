@@ -347,63 +347,93 @@ def generate_questions(request):
 
     return Response({'questions': questions or []})
 
+from django.views.decorators.http import require_GET
+from django.contrib.auth.decorators import login_required
 
-@api_view(['GET'])
-@permission_classes([permissions.IsAuthenticated])
+@require_GET
 def export_quiz(request, quiz_id):
-    print(f"[Export] VIEW HIT quiz_id={quiz_id} user={request.user}")
+    print(f"[Export] HIT quiz_id={quiz_id}")
     try:
         quiz = Quiz.objects.get(id=quiz_id)
-        print(f"[Export] Quiz found: {quiz.title}")
     except Quiz.DoesNotExist:
-        print(f"[Export] Quiz {quiz_id} not found")
-        return Response({'error': 'Quiz not found'}, status=status.HTTP_404_NOT_FOUND)
+        from django.http import Http404
+        raise Http404("Quiz not found")
 
-    print(f"[Export] Checking permissions for user={request.user}")
-    allowed = False
-    if getattr(request.user, "is_admin", False):
-        allowed = True
-        print("[Export] Allowed as admin")
-    elif getattr(request.user, "is_instructor", False) and quiz.course.instructor == request.user:
-        allowed = True
-        print("[Export] Allowed as instructor")
-    elif getattr(request.user, "is_student", False) and Enrollment.objects.filter(student=request.user, course=quiz.course).exists():
-        allowed = True
-        print("[Export] Allowed as student")
-
-    if not allowed:
-        print(f"[Export] PERMISSION DENIED user={request.user} is_admin={getattr(request.user,'is_admin',None)} is_instructor={getattr(request.user,'is_instructor',None)} is_student={getattr(request.user,'is_student',None)}")
-        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
-
-    fmt = (request.query_params.get('format') or 'csv').lower()
-    print(f"[Export] Format: {fmt}")
-
+    fmt = (request.GET.get('format') or 'csv').lower()
     questions = quiz.questions.all().prefetch_related('choices')
-    print(f"[Export] Questions count: {questions.count()}")
 
-    try:
-        from quizzes.export_import import export_csv, export_xml, export_gift
-        if fmt == 'csv':
-            content = export_csv(questions)
-            resp = HttpResponse(content, content_type='text/csv')
-            resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.csv"'
-            return resp
-        if fmt == 'xml':
-            content = export_xml(questions, quiz.title)
-            resp = HttpResponse(content, content_type='application/xml')
-            resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.xml"'
-            return resp
-        if fmt == 'gift':
-            content = export_gift(questions)
-            resp = HttpResponse(content, content_type='text/plain')
-            resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.gift"'
-            return resp
-        return Response({'error': 'Format must be csv, xml, or gift'}, status=400)
-    except Exception as e:
-        import traceback
-        print(f"[Export] EXCEPTION: {e}")
-        traceback.print_exc()
-        return Response({'error': str(e)}, status=500)
+    from quizzes.export_import import export_csv, export_xml, export_gift
+
+    if fmt == 'xml':
+        content = export_xml(questions, quiz.title)
+        resp = HttpResponse(content, content_type='application/xml')
+        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}.xml"'
+    elif fmt == 'gift':
+        content = export_gift(questions)
+        resp = HttpResponse(content, content_type='text/plain')
+        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}.gift"'
+    else:
+        content = export_csv(questions)
+        resp = HttpResponse(content, content_type='text/csv')
+        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}.csv"'
+
+    return resp
+# @api_view(['GET'])
+# @permission_classes([permissions.IsAuthenticated])
+# def export_quiz(request, quiz_id):
+#     print(f"[Export] VIEW HIT quiz_id={quiz_id} user={request.user}")
+#     try:
+#         quiz = Quiz.objects.get(id=quiz_id)
+#         print(f"[Export] Quiz found: {quiz.title}")
+#     except Quiz.DoesNotExist:
+#         print(f"[Export] Quiz {quiz_id} not found")
+#         return Response({'error': 'Quiz not found'}, status=status.HTTP_404_NOT_FOUND)
+
+#     print(f"[Export] Checking permissions for user={request.user}")
+#     allowed = False
+#     if getattr(request.user, "is_admin", False):
+#         allowed = True
+#         print("[Export] Allowed as admin")
+#     elif getattr(request.user, "is_instructor", False) and quiz.course.instructor == request.user:
+#         allowed = True
+#         print("[Export] Allowed as instructor")
+#     elif getattr(request.user, "is_student", False) and Enrollment.objects.filter(student=request.user, course=quiz.course).exists():
+#         allowed = True
+#         print("[Export] Allowed as student")
+
+#     if not allowed:
+#         print(f"[Export] PERMISSION DENIED user={request.user} is_admin={getattr(request.user,'is_admin',None)} is_instructor={getattr(request.user,'is_instructor',None)} is_student={getattr(request.user,'is_student',None)}")
+#         return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+#     fmt = (request.query_params.get('format') or 'csv').lower()
+#     print(f"[Export] Format: {fmt}")
+
+#     questions = quiz.questions.all().prefetch_related('choices')
+#     print(f"[Export] Questions count: {questions.count()}")
+
+#     try:
+#         from quizzes.export_import import export_csv, export_xml, export_gift
+#         if fmt == 'csv':
+#             content = export_csv(questions)
+#             resp = HttpResponse(content, content_type='text/csv')
+#             resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.csv"'
+#             return resp
+#         if fmt == 'xml':
+#             content = export_xml(questions, quiz.title)
+#             resp = HttpResponse(content, content_type='application/xml')
+#             resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.xml"'
+#             return resp
+#         if fmt == 'gift':
+#             content = export_gift(questions)
+#             resp = HttpResponse(content, content_type='text/plain')
+#             resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.gift"'
+#             return resp
+#         return Response({'error': 'Format must be csv, xml, or gift'}, status=400)
+#     except Exception as e:
+#         import traceback
+#         print(f"[Export] EXCEPTION: {e}")
+#         traceback.print_exc()
+#         return Response({'error': str(e)}, status=500)
 
 
 @api_view(['POST'])

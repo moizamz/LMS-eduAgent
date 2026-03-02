@@ -7,11 +7,19 @@ const api = axios.create({
   },
 });
 
-// Add token to requests if available
-const token = localStorage.getItem('token');
-if (token) {
-  api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-}
+// Read token fresh on every request
+// Read token fresh on every request
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  // Let axios set Content-Type automatically for FormData (includes boundary)
+  if (config.data instanceof FormData) {
+    delete config.headers['Content-Type'];
+  }
+  return config;
+});
 
 // Intercept responses to handle token refresh
 api.interceptors.response.use(
@@ -31,7 +39,6 @@ api.interceptors.response.use(
           );
           const { access } = response.data;
           localStorage.setItem('token', access);
-          api.defaults.headers.common['Authorization'] = `Bearer ${access}`;
           originalRequest.headers['Authorization'] = `Bearer ${access}`;
           return api(originalRequest);
         } catch (refreshError) {
@@ -48,4 +55,3 @@ api.interceptors.response.use(
 );
 
 export default api;
-

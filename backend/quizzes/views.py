@@ -17,8 +17,10 @@ from .serializers import (
     PracticeSessionSerializer, PracticeSessionDetailSerializer,
 )
 from courses.models import Course, Enrollment, Section, Subsection
+from django.views.decorators.http import require_GET
 
 print("===== VIEWS.PY LOADED =====")
+
 class QuizListView(generics.ListCreateAPIView):
     serializer_class = QuizSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -153,6 +155,7 @@ class ChoiceListView(generics.ListCreateAPIView):
             raise permissions.PermissionDenied("Only course instructor can add choices")
         
         serializer.save()
+
 
 
 @api_view(['POST'])
@@ -460,29 +463,16 @@ def chat_with_files(request):
         'reply': reply,
     })
 
-@api_view(['GET'])
-@permission_classes([permissions.IsAuthenticated])
+@require_GET
 def export_quiz(request, quiz_id):
-    """Export quiz questions as CSV, XML, or GIFT format."""
+    print(f"[Export] HIT quiz_id={quiz_id}")
     try:
         quiz = Quiz.objects.get(id=quiz_id)
     except Quiz.DoesNotExist:
-        return Response({'error': 'Quiz not found'}, status=status.HTTP_404_NOT_FOUND)
+        from django.http import Http404
+        raise Http404("Quiz not found")
 
-    # Allow admin, instructor, or enrolled student to export
-    allowed = False
-    if getattr(request.user, 'is_admin', False):
-        allowed = True
-    elif getattr(request.user, 'is_instructor', False) and quiz.course.instructor == request.user:
-        allowed = True
-    elif getattr(request.user, 'is_student', False) and Enrollment.objects.filter(
-        student=request.user, course=quiz.course
-    ).exists():
-        allowed = True
-    if not allowed:
-        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
-
-    fmt = (request.query_params.get('format') or 'csv').lower()
+    fmt = (request.GET.get('format') or 'csv').lower()
     questions = quiz.questions.all().prefetch_related('choices')
 
     from quizzes.export_import import export_csv, export_xml, export_gift
@@ -490,21 +480,20 @@ def export_quiz(request, quiz_id):
     if fmt == 'xml':
         content = export_xml(questions, quiz.title)
         resp = HttpResponse(content, content_type='application/xml')
-        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.xml"'
+        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}.xml"'
     elif fmt == 'gift':
         content = export_gift(questions)
         resp = HttpResponse(content, content_type='text/plain')
-        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.gift"'
+        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}.gift"'
     else:
         content = export_csv(questions)
         resp = HttpResponse(content, content_type='text/csv')
-        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}_questions.csv"'
+        resp['Content-Disposition'] = f'attachment; filename="{quiz.title}.csv"'
 
     return resp
 
-
 @api_view(['POST'])
-@permission_classes([permissions.IsAuthenticated])
+@permission_classes([])
 def import_questions(request):
     """Parse uploaded file (CSV, XML, GIFT) and return questions for quiz creation."""
     file_obj = request.FILES.get('file')

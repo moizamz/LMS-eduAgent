@@ -28,6 +28,7 @@ import { toast } from 'react-toastify';
 const AdminPanel = () => {
   const [tabValue, setTabValue] = useState(0);
   const [users, setUsers] = useState([]);
+  const [students, setStudents] = useState([]);
   const [courses, setCourses] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [eduagentAnalytics, setEduagentAnalytics] = useState(null);
@@ -43,21 +44,24 @@ const AdminPanel = () => {
       if (tabValue === 0) {
         const response = await api.get('/auth/users/');
         const allUsers = Array.isArray(response.data) ? response.data : response.data.results || [];
-        // Show only instructors in the admin panel user list
         setUsers(allUsers.filter((u) => u.role === 'instructor'));
       } else if (tabValue === 1) {
+        const response = await api.get('/auth/users/');
+        const allUsers = Array.isArray(response.data) ? response.data : response.data.results || [];
+        setStudents(allUsers.filter((u) => u.role === 'student'));
+      } else if (tabValue === 2) {
         const response = await api.get('/courses/');
         setCourses(Array.isArray(response.data) ? response.data : response.data.results || []);
-      } else if (tabValue === 2) {
+      } else if (tabValue === 3) {
         const response = await api.get('/courses/analytics/');
         setAnalytics(response.data);
-      } else if (tabValue === 3) {
+      } else if (tabValue === 4) {
         const response = await api.get('/quizzes/admin/eduagent-analytics/');
         setEduagentAnalytics(response.data);
       }
     } catch (error) {
       console.error('Error fetching data:', error);
-      if (tabValue === 3) setEduagentAnalytics(null);
+      if (tabValue === 4) setEduagentAnalytics(null);
       toast.error('Failed to load data');
     } finally {
       setLoading(false);
@@ -112,7 +116,8 @@ const AdminPanel = () => {
 
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
         <Tabs value={tabValue} onChange={(e, newValue) => setTabValue(newValue)}>
-          <Tab label="Users" />
+          <Tab label="Instructors" />
+          <Tab label="Students" />
           <Tab label="Courses" />
           <Tab label="Analytics" />
           <Tab label="EduAgent" />
@@ -206,6 +211,57 @@ const AdminPanel = () => {
               <Table>
                 <TableHead>
                   <TableRow>
+                    <TableCell>Username</TableCell>
+                    <TableCell>Email</TableCell>
+                    <TableCell>Name</TableCell>
+                    <TableCell>Status</TableCell>
+                    <TableCell>Actions</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {students.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5}>
+                        <Typography variant="body2" color="text.secondary">
+                          No student accounts found.
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    students.map((user) => (
+                      <TableRow key={user.id}>
+                        <TableCell>{user.username}</TableCell>
+                        <TableCell>{user.email}</TableCell>
+                        <TableCell>
+                          {user.first_name} {user.last_name}
+                        </TableCell>
+                        <TableCell>
+                          {!user.is_active ? <Chip label="Blocked" color="error" size="small" /> : <Chip label="Active" color="success" size="small" />}
+                        </TableCell>
+                        <TableCell>
+                          {user.is_active ? (
+                            <Button size="small" color="error" startIcon={<Block />} onClick={() => handleBlockUser(user.id)}>
+                              Block
+                            </Button>
+                          ) : (
+                            <Button size="small" color="primary" startIcon={<Block />} onClick={() => handleUnblockUser(user.id)}>
+                              Unblock
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+
+          {tabValue === 2 && (
+            <TableContainer component={Paper}>
+              <Table>
+                <TableHead>
+                  <TableRow>
                     <TableCell>Title</TableCell>
                     <TableCell>Instructor</TableCell>
                     <TableCell>Status</TableCell>
@@ -234,7 +290,7 @@ const AdminPanel = () => {
             </TableContainer>
           )}
 
-          {tabValue === 2 && analytics && (
+          {tabValue === 3 && analytics && (
             <Grid container spacing={3}>
               <Grid item xs={12} sm={6} md={3}>
                 <Card>
@@ -275,13 +331,13 @@ const AdminPanel = () => {
             </Grid>
           )}
 
-          {tabValue === 3 && !loading && !eduagentAnalytics && (
+          {tabValue === 4 && !loading && !eduagentAnalytics && (
             <Typography color="text.secondary" sx={{ py: 4 }}>
               EduAgent metrics could not be loaded (check admin role) or no adaptive sessions exist yet.
             </Typography>
           )}
 
-          {tabValue === 3 && eduagentAnalytics && (
+          {tabValue === 4 && eduagentAnalytics && (
             <Box>
               <Paper
                 elevation={0}

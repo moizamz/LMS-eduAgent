@@ -35,7 +35,8 @@ class AssignmentSubmission(models.Model):
                                   limit_choices_to={'role__in': ['instructor', 'admin']})
     graded_at = models.DateTimeField(blank=True, null=True)
     is_graded = models.BooleanField(default=False)
-    
+    ai_grading = models.JSONField(default=dict, blank=True)
+
     class Meta:
         unique_together = ['assignment', 'student']
         ordering = ['-submitted_at']

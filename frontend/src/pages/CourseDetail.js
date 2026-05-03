@@ -39,10 +39,12 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  TableContainer,
 } from '@mui/material';
 import {
   PlayArrow, Description, Link as LinkIcon, TextFields,
   Add, Delete, UploadFile, Folder, InsertDriveFile, GetApp, AutoAwesome, Edit, Lightbulb, FileDownload, FileUpload,
+  PictureAsPdf,
   EmojiEvents,
   People,
 } from '@mui/icons-material';
@@ -109,11 +111,24 @@ const CourseDetail = () => {
     due_date: '',
     max_score: 100,
     instruction_file: null,
+    instruction_cleared: false,
   });
+  const [assignmentEditingId, setAssignmentEditingId] = useState(null);
+  const [assignmentExistingInstructionUrl, setAssignmentExistingInstructionUrl] = useState(null);
   const [assignmentSubmissionsOpen, setAssignmentSubmissionsOpen] = useState(false);
   const [assignmentSubmissionsLoading, setAssignmentSubmissionsLoading] = useState(false);
   const [assignmentSubmissions, setAssignmentSubmissions] = useState([]);
   const [assignmentSubmissionsAssignment, setAssignmentSubmissionsAssignment] = useState(null);
+  const [assignmentAiGradingId, setAssignmentAiGradingId] = useState(null);
+  const [assignmentGradeDialogOpen, setAssignmentGradeDialogOpen] = useState(false);
+  const [assignmentGradeSubmission, setAssignmentGradeSubmission] = useState(null);
+  const [assignmentGradeScore, setAssignmentGradeScore] = useState('');
+  const [assignmentGradeFeedback, setAssignmentGradeFeedback] = useState('');
+  const [myAssignmentSubmissions, setMyAssignmentSubmissions] = useState({});
+  const [studentSubmitDialogAssignment, setStudentSubmitDialogAssignment] = useState(null);
+  const [studentSubmitText, setStudentSubmitText] = useState('');
+  const [studentSubmitFile, setStudentSubmitFile] = useState(null);
+  const [studentSubmitSaving, setStudentSubmitSaving] = useState(false);
 
   // Chat tab
   const [chatFiles, setChatFiles] = useState([]);
@@ -320,6 +335,107 @@ const CourseDetail = () => {
     }
   };
 
+  useEffect(() => {
+    if (user?.role !== 'student' || !id) {
+      setMyAssignmentSubmissions({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ms = await api.get('/assignments/my-submissions/', { params: { course_id: id } });
+        if (cancelled) return;
+        const list = Array.isArray(ms.data) ? ms.data : ms.data.results || [];
+        const byAid = {};
+        list.forEach((s) => {
+          const aid = s.assignment?.id;
+          if (aid) byAid[aid] = s;
+        });
+        setMyAssignmentSubmissions(byAid);
+      } catch {
+        if (!cancelled) setMyAssignmentSubmissions({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, user?.role]);
+
+  const openStudentSubmitDialog = async (assignment) => {
+    setStudentSubmitDialogAssignment(assignment);
+    setStudentSubmitFile(null);
+    if (user?.role !== 'student' || !id) {
+      setStudentSubmitText('');
+      return;
+    }
+    try {
+      const ms = await api.get('/assignments/my-submissions/', { params: { course_id: id } });
+      const list = Array.isArray(ms.data) ? ms.data : ms.data.results || [];
+      const byAid = {};
+      list.forEach((s) => {
+        const aid = s.assignment?.id;
+        if (aid) byAid[aid] = s;
+      });
+      setMyAssignmentSubmissions(byAid);
+      setStudentSubmitText(byAid[assignment.id]?.submission_text || '');
+    } catch {
+      const sub = myAssignmentSubmissions[assignment.id];
+      setStudentSubmitText(sub?.submission_text || '');
+    }
+  };
+
+  const handleStudentSubmitSave = async () => {
+    const a = studentSubmitDialogAssignment;
+    if (!a) return;
+    const sub = myAssignmentSubmissions[a.id];
+    const text = (studentSubmitText || '').trim();
+    const hasFile = !!studentSubmitFile;
+    const hadPrior = sub && sub.grading_status && sub.grading_status !== 'not_submitted';
+    if (!hadPrior && !hasFile && !text) {
+      toast.error('Add a file and/or a written response.');
+      return;
+    }
+    if (sub?.is_graded) {
+      toast.error('This assignment is already graded.');
+      return;
+    }
+    setStudentSubmitSaving(true);
+    try {
+      const formData = new FormData();
+      if (hasFile) formData.append('submission_file', studentSubmitFile);
+      formData.append('submission_text', studentSubmitText || '');
+      const res = await api.post(`/assignments/${a.id}/submit/`, formData);
+      setMyAssignmentSubmissions((prev) => ({ ...prev, [a.id]: res.data }));
+      toast.success(sub && hadPrior ? 'Submission updated' : 'Assignment submitted');
+      if (!hadPrior) {
+        try {
+          const ev = await api.post('/gamification/events/', {
+            course_id: id,
+            event_type: 'assignment_submitted',
+            metadata: { assignment_id: a.id },
+          });
+          if (ev.data?.remark && ev.data?.points_awarded > 0) {
+            pushEngagement({
+              headline: 'Assignment turned in',
+              body: ev.data.remark,
+              sub: `+${ev.data.points_awarded || 0} XP`,
+              badges: ev.data.badges || [],
+            });
+          }
+          await refreshGamification();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      setStudentSubmitDialogAssignment(null);
+      setStudentSubmitFile(null);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Submission failed');
+    } finally {
+      setStudentSubmitSaving(false);
+    }
+  };
+
   const fetchChatSessions = async () => {
     try {
       const res = await api.get('/quizzes/chat-sessions/');
@@ -340,6 +456,168 @@ const CourseDetail = () => {
       toast.error(e.response?.data?.error || 'Failed to load submissions');
     } finally {
       setAssignmentSubmissionsLoading(false);
+    }
+  };
+
+  const assignmentHasAiGradingExport = (s) => {
+    const ai = s?.ai_grading;
+    if (!ai || typeof ai !== 'object') return false;
+    return (
+      (Array.isArray(ai.rubric) && ai.rubric.length > 0) ||
+      (ai.suggested_score != null && ai.suggested_score !== '') ||
+      String(ai.overall_explanation || '').trim().length > 0 ||
+      (Array.isArray(ai.strengths) && ai.strengths.length > 0) ||
+      (Array.isArray(ai.improvements) && ai.improvements.length > 0) ||
+      String(ai.grading_confidence || '').trim().length > 0
+    );
+  };
+
+  /** mode: 'ai_review' | 'manual_new' | 'edit_finalized' */
+  const openAssignmentGradeDialog = (submission, mode) => {
+    const ai = submission.ai_grading || {};
+    setAssignmentGradeSubmission(submission);
+    const resolvedMode =
+      mode || (submission.is_graded ? 'edit_finalized' : 'ai_review');
+    if (resolvedMode === 'edit_finalized') {
+      setAssignmentGradeScore(submission.score != null ? String(submission.score) : '');
+      setAssignmentGradeFeedback(String(submission.feedback || ''));
+    } else if (resolvedMode === 'manual_new') {
+      setAssignmentGradeScore('');
+      setAssignmentGradeFeedback('');
+    } else {
+      setAssignmentGradeScore(
+        ai.suggested_score != null && ai.suggested_score !== '' ? String(ai.suggested_score) : ''
+      );
+      setAssignmentGradeFeedback(ai.overall_explanation != null ? String(ai.overall_explanation) : '');
+    }
+    setAssignmentGradeDialogOpen(true);
+  };
+
+  const handleAssignmentAiGrade = async (submission) => {
+    if (submission.is_graded) {
+      toast.error('This submission is already graded.');
+      return;
+    }
+    if (!submission.submission_file && !submission.submission_text) {
+      toast.error('No submission file or text to grade.');
+      return;
+    }
+    setAssignmentAiGradingId(submission.id);
+    try {
+      const res = await api.post(`/assignments/submissions/${submission.id}/ai-grade/`);
+      const updated = res.data;
+      setAssignmentSubmissions((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      openAssignmentGradeDialog(updated, 'ai_review');
+      toast.success('AI grading finished — review rubric and approve or edit the score.');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'AI grading failed');
+    } finally {
+      setAssignmentAiGradingId(null);
+    }
+  };
+
+  const handleApproveAiGrade = async () => {
+    if (!assignmentGradeSubmission) return;
+    const scoreNum = Number.parseFloat(String(assignmentGradeScore).trim());
+    if (Number.isNaN(scoreNum)) {
+      toast.error('Enter a valid numeric score.');
+      return;
+    }
+    try {
+      const res = await api.post(`/assignments/submissions/${assignmentGradeSubmission.id}/approve-ai-grade/`, {
+        score: scoreNum,
+        feedback: assignmentGradeFeedback || undefined,
+      });
+      const updated = res.data;
+      setAssignmentSubmissions((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      setAssignmentGradeDialogOpen(false);
+      setAssignmentGradeSubmission(null);
+      toast.success('Grade saved and marked complete.');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Could not approve grade');
+    }
+  };
+
+  const handleManualGradeSave = async () => {
+    if (!assignmentGradeSubmission) return;
+    const scoreNum = Number.parseFloat(String(assignmentGradeScore).trim());
+    if (Number.isNaN(scoreNum)) {
+      toast.error('Enter a valid numeric score.');
+      return;
+    }
+    try {
+      const wasGraded = !!assignmentGradeSubmission.is_graded;
+      const res = await api.post(`/assignments/submissions/${assignmentGradeSubmission.id}/grade/`, {
+        score: scoreNum,
+        feedback: assignmentGradeFeedback || '',
+      });
+      const updated = res.data;
+      setAssignmentSubmissions((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      setAssignmentGradeDialogOpen(false);
+      setAssignmentGradeSubmission(null);
+      toast.success(wasGraded ? 'Grade updated.' : 'Manual grade saved.');
+    } catch (e) {
+      const errData = e.response?.data;
+      let msg = 'Could not save grade';
+      if (errData instanceof Blob) {
+        try {
+          const t = await errData.text();
+          const j = JSON.parse(t);
+          msg = j.error || msg;
+        } catch {
+          /* ignore */
+        }
+      } else if (errData?.error) {
+        msg = errData.error;
+      }
+      toast.error(msg);
+    }
+  };
+
+  const handleDownloadAiGradingPdf = async () => {
+    if (!assignmentGradeSubmission?.id) return;
+    try {
+      const res = await api.get(
+        `/assignments/submissions/${assignmentGradeSubmission.id}/ai-grading-pdf/`,
+        { responseType: 'blob' }
+      );
+      const ct = (res.headers && res.headers['content-type']) || '';
+      if (ct.includes('application/json')) {
+        const text = await res.data.text();
+        let msg = 'Could not generate PDF';
+        try {
+          const j = JSON.parse(text);
+          msg = j.error || msg;
+        } catch {
+          /* ignore */
+        }
+        toast.error(msg);
+        return;
+      }
+      const blob = new Blob([res.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `ai_grading_${assignmentGradeSubmission.id}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success('PDF downloaded.');
+    } catch (e) {
+      let msg = 'Could not download PDF';
+      if (e.response?.data instanceof Blob) {
+        try {
+          const t = await e.response.data.text();
+          const j = JSON.parse(t);
+          msg = j.error || msg;
+        } catch {
+          /* ignore */
+        }
+      } else if (e.response?.data?.error) {
+        msg = e.response.data.error;
+      }
+      toast.error(msg);
     }
   };
 
@@ -870,6 +1148,28 @@ const CourseDetail = () => {
   };
 
   const isInstructorOrAdmin = user?.role === 'instructor' || user?.role === 'admin';
+
+  const formatAssignmentDueForInput = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+
+  const openEditAssignment = (a) => {
+    setAssignmentEditingId(a.id);
+    setAssignmentExistingInstructionUrl(a.instruction_file_url || null);
+    setAssignmentForm({
+      title: a.title || '',
+      description: a.description || '',
+      due_date: formatAssignmentDueForInput(a.due_date),
+      max_score: a.max_score ?? 100,
+      instruction_file: null,
+      instruction_cleared: false,
+    });
+    setAssignmentDialogOpen(true);
+  };
 
   const handleCreateSection = async () => {
     if (!sectionForm.title.trim()) {
@@ -1492,12 +1792,15 @@ const CourseDetail = () => {
                     variant="contained"
                     startIcon={<Add />}
                     onClick={() => {
+                      setAssignmentEditingId(null);
+                      setAssignmentExistingInstructionUrl(null);
                       setAssignmentForm({
                         title: '',
                         description: '',
                         due_date: '',
                         max_score: 100,
                         instruction_file: null,
+                        instruction_cleared: false,
                       });
                       setAssignmentDialogOpen(true);
                     }}
@@ -1546,55 +1849,42 @@ const CourseDetail = () => {
                             Instructions
                           </Button>
                         )}
-                        {user?.role === 'student' && (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            component="label"
-                          >
-                            Submit
-                            <input
-                              type="file"
-                              hidden
-                              onChange={async (e) => {
-                                const f = e.target.files?.[0];
-                                if (!f) return;
-                                const formData = new FormData();
-                                formData.append('submission_file', f);
-                                try {
-                                  await api.post(`/assignments/${a.id}/submit/`, formData);
-                                  toast.success('Assignment submitted');
-                                  try {
-                                    const ev = await api.post('/gamification/events/', {
-                                      course_id: id,
-                                      event_type: 'assignment_submitted',
-                                      metadata: { assignment_id: a.id },
-                                    });
-                                    if (ev.data?.remark && ev.data?.points_awarded > 0) {
-                                      pushEngagement({
-                                        headline: 'Assignment turned in',
-                                        body: ev.data.remark,
-                                        sub: `+${ev.data.points_awarded || 0} XP`,
-                                        badges: ev.data.badges || [],
-                                      });
-                                    }
-                                    await refreshGamification();
-                                  } catch (_) {
-                                    /* ignore */
-                                  }
-                                } catch (err) {
-                                  toast.error(err.response?.data?.error || 'Submission failed');
-                                } finally {
-                                  e.target.value = '';
-                                }
-                              }}
-                            />
-                          </Button>
-                        )}
+                        {user?.role === 'student' && (() => {
+                          const sub = myAssignmentSubmissions[a.id];
+                          const st = sub?.grading_status || 'not_submitted';
+                          const statusLabel =
+                            st === 'graded'
+                              ? 'Graded'
+                              : st === 'submitted_pending'
+                                ? 'Awaiting instructor grade'
+                                : 'Not submitted';
+                          return (
+                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+                              <Chip
+                                size="small"
+                                label={statusLabel}
+                                color={st === 'graded' ? 'success' : st === 'submitted_pending' ? 'warning' : 'default'}
+                                variant={st === 'not_submitted' ? 'outlined' : 'filled'}
+                              />
+                              <Button
+                                size="small"
+                                variant={st === 'graded' ? 'outlined' : 'contained'}
+                                onClick={() => openStudentSubmitDialog(a)}
+                              >
+                                {st === 'graded' ? 'View grade' : 'Submit / manage'}
+                              </Button>
+                            </Box>
+                          );
+                        })()}
                         {isInstructorOrAdmin && (
-                          <Button size="small" variant="outlined" onClick={() => handleViewAssignmentSubmissions(a)}>
-                            View submissions
-                          </Button>
+                          <>
+                            <Button size="small" variant="outlined" startIcon={<Edit />} onClick={() => openEditAssignment(a)}>
+                              Edit
+                            </Button>
+                            <Button size="small" variant="outlined" onClick={() => handleViewAssignmentSubmissions(a)}>
+                              View submissions
+                            </Button>
+                          </>
                         )}
                       </Box>
                     </ListItem>
@@ -1607,11 +1897,15 @@ const CourseDetail = () => {
           {/* Create Assignment Dialog for instructors */}
           <Dialog
             open={assignmentDialogOpen}
-            onClose={() => setAssignmentDialogOpen(false)}
+            onClose={() => {
+              setAssignmentDialogOpen(false);
+              setAssignmentEditingId(null);
+              setAssignmentExistingInstructionUrl(null);
+            }}
             maxWidth="sm"
             fullWidth
           >
-            <DialogTitle>Create Assignment</DialogTitle>
+            <DialogTitle>{assignmentEditingId ? 'Edit assignment' : 'Create assignment'}</DialogTitle>
             <DialogContent>
               <TextField
                 fullWidth
@@ -1646,28 +1940,72 @@ const CourseDetail = () => {
                 value={assignmentForm.max_score}
                 onChange={(e) => setAssignmentForm((p) => ({ ...p, max_score: Number(e.target.value) || 100 }))}
               />
+              {assignmentEditingId &&
+                assignmentExistingInstructionUrl &&
+                !assignmentForm.instruction_cleared &&
+                !assignmentForm.instruction_file && (
+                  <Alert severity="info" sx={{ mt: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      An instruction file is attached to this assignment.
+                    </Typography>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<GetApp />}
+                      component="a"
+                      href={assignmentExistingInstructionUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      sx={{ mr: 1 }}
+                    >
+                      View current file
+                    </Button>
+                    <Button
+                      size="small"
+                      color="warning"
+                      variant="outlined"
+                      onClick={() =>
+                        setAssignmentForm((p) => ({ ...p, instruction_cleared: true, instruction_file: null }))
+                      }
+                    >
+                      Delete instruction file
+                    </Button>
+                  </Alert>
+                )}
+              {assignmentEditingId && assignmentForm.instruction_cleared && !assignmentForm.instruction_file && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  The instruction file will be removed when you save (unless you upload a replacement).
+                </Alert>
+              )}
               <Box sx={{ mt: 2 }}>
-                <Button
-                  component="label"
-                  variant="outlined"
-                  startIcon={<UploadFile />}
-                  fullWidth
-                >
-                  {assignmentForm.instruction_file ? assignmentForm.instruction_file.name : 'Upload instructions PDF (optional)'}
+                <Button component="label" variant="outlined" startIcon={<UploadFile />} fullWidth>
+                  {assignmentForm.instruction_file
+                    ? `Replace with: ${assignmentForm.instruction_file.name}`
+                    : assignmentEditingId
+                      ? 'Upload / replace instructions (optional)'
+                      : 'Upload instructions file (optional)'}
                   <input
                     type="file"
-                    accept="application/pdf"
+                    accept=".pdf,.doc,.docx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
                     hidden
                     onChange={(e) => {
                       const f = e.target.files?.[0] || null;
-                      setAssignmentForm((p) => ({ ...p, instruction_file: f }));
+                      setAssignmentForm((p) => ({ ...p, instruction_file: f, instruction_cleared: false }));
                     }}
                   />
                 </Button>
               </Box>
             </DialogContent>
             <DialogActions>
-              <Button onClick={() => setAssignmentDialogOpen(false)}>Cancel</Button>
+              <Button
+                onClick={() => {
+                  setAssignmentDialogOpen(false);
+                  setAssignmentEditingId(null);
+                  setAssignmentExistingInstructionUrl(null);
+                }}
+              >
+                Cancel
+              </Button>
               <Button
                 variant="contained"
                 onClick={async () => {
@@ -1686,22 +2024,170 @@ const CourseDetail = () => {
                     formData.append('due_date', assignmentForm.due_date);
                   }
                   formData.append('max_score', String(assignmentForm.max_score || 100));
-                  formData.append('course_id', String(id));
                   if (assignmentForm.instruction_file) {
                     formData.append('instruction_file', assignmentForm.instruction_file);
                   }
-                  try {
-                    await api.post('/assignments/', formData);
-                    toast.success('Assignment created');
-                    setAssignmentDialogOpen(false);
-                    fetchAssignments();
-                  } catch (err) {
-                    toast.error(err.response?.data?.error || 'Failed to create assignment');
+                  if (assignmentEditingId) {
+                    if (assignmentForm.instruction_cleared) {
+                      formData.append('clear_instruction_file', 'true');
+                    }
+                    try {
+                      await api.patch(`/assignments/${assignmentEditingId}/`, formData);
+                      toast.success('Assignment updated');
+                      setAssignmentDialogOpen(false);
+                      setAssignmentEditingId(null);
+                      setAssignmentExistingInstructionUrl(null);
+                      fetchAssignments();
+                    } catch (err) {
+                      toast.error(err.response?.data?.error || err.response?.data?.detail || 'Failed to update assignment');
+                    }
+                  } else {
+                    formData.append('course_id', String(id));
+                    try {
+                      await api.post('/assignments/', formData);
+                      toast.success('Assignment created');
+                      setAssignmentDialogOpen(false);
+                      setAssignmentEditingId(null);
+                      setAssignmentExistingInstructionUrl(null);
+                      fetchAssignments();
+                    } catch (err) {
+                      toast.error(err.response?.data?.error || 'Failed to create assignment');
+                    }
                   }
                 }}
               >
-                Create
+                {assignmentEditingId ? 'Save changes' : 'Create'}
               </Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* Student: submit, edit before grading, view marks after graded */}
+          <Dialog
+            open={!!studentSubmitDialogAssignment}
+            onClose={() => {
+              if (!studentSubmitSaving) {
+                setStudentSubmitDialogAssignment(null);
+                setStudentSubmitFile(null);
+              }
+            }}
+            maxWidth="sm"
+            fullWidth
+          >
+            <DialogTitle>
+              {studentSubmitDialogAssignment
+                ? `Your submission — ${studentSubmitDialogAssignment.title}`
+                : 'Your submission'}
+            </DialogTitle>
+            <DialogContent dividers>
+              {studentSubmitDialogAssignment && (() => {
+                const a = studentSubmitDialogAssignment;
+                const sub = myAssignmentSubmissions[a.id];
+                const st = sub?.grading_status || 'not_submitted';
+                const graded = st === 'graded' || sub?.is_graded;
+                if (graded) {
+                  return (
+                    <Box>
+                      <Chip size="small" label="Graded" color="success" sx={{ mb: 2 }} />
+                      <Typography variant="body1" sx={{ mb: 1 }}>
+                        Score:{' '}
+                        <strong>
+                          {sub?.score != null ? sub.score : '—'} / {a.max_score ?? '—'}
+                        </strong>
+                      </Typography>
+                      {sub?.graded_at && (
+                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+                          Graded: {new Date(sub.graded_at).toLocaleString()}
+                        </Typography>
+                      )}
+                      <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                        Instructor feedback
+                      </Typography>
+                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                        {sub?.feedback?.trim() ? sub.feedback : 'No written feedback.'}
+                      </Typography>
+                      {sub?.submission_file_name && (
+                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 2 }}>
+                          File submitted: {sub.submission_file_name}
+                        </Typography>
+                      )}
+                    </Box>
+                  );
+                }
+                return (
+                  <Box>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                      You can update your file and written response until your instructor posts a final grade.
+                    </Typography>
+                    {sub?.submission_file_name && (
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                        Current file: {sub.submission_file_name}
+                      </Typography>
+                    )}
+                    <Button variant="outlined" component="label" size="small" sx={{ mb: 2 }}>
+                      {sub?.submission_file_name ? 'Replace file' : 'Attach file'}
+                      <input
+                        type="file"
+                        hidden
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          setStudentSubmitFile(f || null);
+                          e.target.value = '';
+                        }}
+                      />
+                    </Button>
+                    {studentSubmitFile && (
+                      <Typography variant="caption" display="block" sx={{ mb: 2 }}>
+                        New file: {studentSubmitFile.name}
+                      </Typography>
+                    )}
+                    <TextField
+                      fullWidth
+                      multiline
+                      minRows={4}
+                      label="Written response (optional)"
+                      value={studentSubmitText}
+                      onChange={(e) => setStudentSubmitText(e.target.value)}
+                      margin="normal"
+                    />
+                  </Box>
+                );
+              })()}
+            </DialogContent>
+            <DialogActions>
+              <Button
+                onClick={() => {
+                  if (!studentSubmitSaving) {
+                    setStudentSubmitDialogAssignment(null);
+                    setStudentSubmitFile(null);
+                  }
+                }}
+              >
+                {(() => {
+                  const sub = studentSubmitDialogAssignment
+                    ? myAssignmentSubmissions[studentSubmitDialogAssignment.id]
+                    : null;
+                  const graded =
+                    sub?.grading_status === 'graded' || sub?.is_graded;
+                  return graded ? 'Close' : 'Cancel';
+                })()}
+              </Button>
+              {(() => {
+                const sub = studentSubmitDialogAssignment
+                  ? myAssignmentSubmissions[studentSubmitDialogAssignment.id]
+                  : null;
+                const graded =
+                  sub?.grading_status === 'graded' || sub?.is_graded;
+                if (graded) return null;
+                return (
+                  <Button
+                    variant="contained"
+                    disabled={studentSubmitSaving}
+                    onClick={handleStudentSubmitSave}
+                  >
+                    {studentSubmitSaving ? 'Saving…' : 'Save submission'}
+                  </Button>
+                );
+              })()}
             </DialogActions>
           </Dialog>
 
@@ -1725,15 +2211,65 @@ const CourseDetail = () => {
               ) : (
                 <List>
                   {assignmentSubmissions.map((s) => (
-                    <ListItem key={s.id} divider>
+                    <ListItem key={s.id} divider alignItems="flex-start">
                       <ListItemText
                         primary={`${s.student?.first_name || ''} ${s.student?.last_name || ''}`.trim() || s.student?.username || 'Student'}
-                        secondary={`Submitted: ${s.submitted_at ? new Date(s.submitted_at).toLocaleString() : '—'}`}
+                        secondary={
+                          <Box component="span" sx={{ mt: 0.5 }}>
+                            <Typography variant="body2" color="text.secondary" component="span" display="block">
+                              Submitted: {s.submitted_at ? new Date(s.submitted_at).toLocaleString() : '—'}
+                            </Typography>
+                            {s.is_graded && (
+                              <Typography variant="body2" color="primary" component="span" display="block" sx={{ mt: 0.5 }}>
+                                Final score: {s.score} / {assignmentSubmissionsAssignment?.max_score ?? '—'}
+                              </Typography>
+                            )}
+                            {!s.is_graded && s.ai_grading?.suggested_score != null && s.ai_grading?.suggested_score !== '' && (
+                              <Typography variant="caption" color="secondary" component="span" display="block">
+                                AI suggested score: {s.ai_grading.suggested_score} (not finalized)
+                              </Typography>
+                            )}
+                          </Box>
+                        }
                       />
-                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, justifyContent: 'flex-end' }}>
                         {s.submission_file && (
                           <Button size="small" variant="outlined" component="a" href={s.submission_file} target="_blank" rel="noopener noreferrer">
                             Download
+                          </Button>
+                        )}
+                        {!s.is_graded && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="secondary"
+                            startIcon={<AutoAwesome />}
+                            disabled={
+                              assignmentAiGradingId === s.id ||
+                              (!s.submission_file && !s.submission_text)
+                            }
+                            onClick={() => handleAssignmentAiGrade(s)}
+                          >
+                            {assignmentAiGradingId === s.id ? 'Grading…' : 'Grade using AI'}
+                          </Button>
+                        )}
+                        {!s.is_graded && s.ai_grading && (s.ai_grading.rubric?.length > 0 || s.ai_grading.suggested_score != null) && (
+                          <Button size="small" variant="outlined" onClick={() => openAssignmentGradeDialog(s, 'ai_review')}>
+                            Review AI result
+                          </Button>
+                        )}
+                        {!s.is_graded && (
+                          <Button
+                            size="small"
+                            variant="text"
+                            onClick={() => openAssignmentGradeDialog(s, 'manual_new')}
+                          >
+                            Enter grade manually
+                          </Button>
+                        )}
+                        {s.is_graded && (
+                          <Button size="small" variant="outlined" onClick={() => openAssignmentGradeDialog(s, 'edit_finalized')}>
+                            Edit grade
                           </Button>
                         )}
                       </Box>
@@ -1744,6 +2280,146 @@ const CourseDetail = () => {
             </DialogContent>
             <DialogActions>
               <Button onClick={() => { setAssignmentSubmissionsOpen(false); setAssignmentSubmissions([]); setAssignmentSubmissionsAssignment(null); }}>Close</Button>
+            </DialogActions>
+          </Dialog>
+
+          <Dialog
+            open={assignmentGradeDialogOpen}
+            onClose={() => {
+              setAssignmentGradeDialogOpen(false);
+              setAssignmentGradeSubmission(null);
+            }}
+            maxWidth="lg"
+            fullWidth
+          >
+            <DialogTitle>
+              {assignmentGradeSubmission?.is_graded ? 'Edit student grade' : 'AI grading review'}
+            </DialogTitle>
+            <DialogContent dividers>
+              {assignmentGradeSubmission && (
+                <Box>
+                  <Typography variant="subtitle2" gutterBottom>
+                    {`${assignmentGradeSubmission.student?.first_name || ''} ${assignmentGradeSubmission.student?.last_name || ''}`.trim() ||
+                      assignmentGradeSubmission.student?.username}
+                  </Typography>
+                  {assignmentGradeSubmission.ai_grading?.grading_confidence && (
+                    <Chip
+                      size="small"
+                      label={`Model confidence: ${assignmentGradeSubmission.ai_grading.grading_confidence}`}
+                      sx={{ mb: 2 }}
+                    />
+                  )}
+                  {(assignmentGradeSubmission.ai_grading?.rubric || []).length > 0 && (
+                    <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Criterion</TableCell>
+                            <TableCell align="right">Max</TableCell>
+                            <TableCell align="right">Awarded</TableCell>
+                            <TableCell>Comment</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {(assignmentGradeSubmission.ai_grading.rubric || []).map((row, idx) => (
+                            <TableRow key={idx}>
+                              <TableCell>{row.criterion}</TableCell>
+                              <TableCell align="right">{row.max_points}</TableCell>
+                              <TableCell align="right">{row.awarded_points}</TableCell>
+                              <TableCell>{row.comment}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  )}
+                  {(assignmentGradeSubmission.ai_grading?.strengths || []).length > 0 && (
+                    <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                      Strengths
+                    </Typography>
+                  )}
+                  <List dense>
+                    {(assignmentGradeSubmission.ai_grading?.strengths || []).map((t, i) => (
+                      <ListItem key={`st-${i}`} sx={{ py: 0 }}>
+                        <ListItemText primaryTypographyProps={{ variant: 'body2' }} primary={`• ${t}`} />
+                      </ListItem>
+                    ))}
+                  </List>
+                  {(assignmentGradeSubmission.ai_grading?.improvements || []).length > 0 && (
+                    <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                      Improvements
+                    </Typography>
+                  )}
+                  <List dense>
+                    {(assignmentGradeSubmission.ai_grading?.improvements || []).map((t, i) => (
+                      <ListItem key={`im-${i}`} sx={{ py: 0 }}>
+                        <ListItemText primaryTypographyProps={{ variant: 'body2' }} primary={`• ${t}`} />
+                      </ListItem>
+                    ))}
+                  </List>
+                  <Divider sx={{ my: 2 }} />
+                  <Typography variant="subtitle2" gutterBottom>
+                    {assignmentGradeSubmission.is_graded
+                      ? 'Final score and feedback (visible to student)'
+                      : 'Finalize grade (edit if needed)'}
+                  </Typography>
+                  <TextField
+                    fullWidth
+                    label={`Score (max ${assignmentSubmissionsAssignment?.max_score ?? 100})`}
+                    value={assignmentGradeScore}
+                    onChange={(e) => setAssignmentGradeScore(e.target.value)}
+                    margin="normal"
+                    type="number"
+                    inputProps={{ step: 'any', min: 0, max: assignmentSubmissionsAssignment?.max_score ?? 100 }}
+                  />
+                  <TextField
+                    fullWidth
+                    label="Feedback for student (defaults to AI explanation if unchanged)"
+                    value={assignmentGradeFeedback}
+                    onChange={(e) => setAssignmentGradeFeedback(e.target.value)}
+                    margin="normal"
+                    multiline
+                    minRows={4}
+                  />
+                </Box>
+              )}
+            </DialogContent>
+            <DialogActions sx={{ flexWrap: 'wrap', gap: 1 }}>
+              <Button
+                onClick={() => {
+                  setAssignmentGradeDialogOpen(false);
+                  setAssignmentGradeSubmission(null);
+                }}
+              >
+                Close
+              </Button>
+              {assignmentGradeSubmission && assignmentHasAiGradingExport(assignmentGradeSubmission) && (
+                <Button
+                  variant="outlined"
+                  startIcon={<PictureAsPdf />}
+                  onClick={handleDownloadAiGradingPdf}
+                >
+                  Download AI explanation (PDF)
+                </Button>
+              )}
+              {assignmentGradeSubmission?.is_graded ? (
+                <Button variant="contained" color="primary" onClick={handleManualGradeSave}>
+                  Save grade changes
+                </Button>
+              ) : (
+                <>
+                  <Button variant="outlined" color="primary" onClick={handleManualGradeSave}>
+                    Save manual grade only
+                  </Button>
+                  {assignmentGradeSubmission?.ai_grading &&
+                    (assignmentGradeSubmission.ai_grading.rubric?.length > 0 ||
+                      assignmentGradeSubmission.ai_grading.suggested_score != null) && (
+                      <Button variant="contained" color="primary" onClick={handleApproveAiGrade}>
+                        Approve AI-assisted grade
+                      </Button>
+                    )}
+                </>
+              )}
             </DialogActions>
           </Dialog>
         </>

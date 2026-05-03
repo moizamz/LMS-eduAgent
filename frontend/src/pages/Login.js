@@ -22,6 +22,7 @@ import {
   School,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
+import logo from '../assets/logo.png'
 
 const Login = () => {
   const [email, setEmail] = useState('');
@@ -137,7 +138,7 @@ const Login = () => {
                 }}
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <Box
+                  {/* <Box
                     sx={{
                       width: 40,
                       height: 40,
@@ -148,9 +149,10 @@ const Login = () => {
                       justifyContent: 'center',
                       boxShadow: '0 10px 25px rgba(79, 70, 229, 0.35)',
                     }}
-                  >
-                    <School sx={{ color: '#ffffff', fontSize: 22 }} />
-                  </Box>
+                  > */}
+                    {/* <School sx={{ color: '#ffffff', fontSize: 22 }} /> */}
+                    <img src={logo} alt="EduAgent" style={{ width: 40, height: 40 }} />
+                  {/* </Box> */}
                   <Box>
                     <Typography
                       variant="h5"

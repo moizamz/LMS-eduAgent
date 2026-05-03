@@ -79,9 +79,9 @@ function AppContent() {
   return (
     <div className="App">
       {!hideNavbar && <Navbar />}
-      <Box sx={{ display: 'flex', mt: hideNavbar ? 0 : '64px' }}>
+      <Box sx={{ display: 'flex', mt: hideNavbar ? 0 : '10px' }}>
         {!hideNavbar && <Sidebar />}
-        <Box component="main" sx={{ flexGrow: 1, ml: hideNavbar ? 0 : '240px' }}>
+        <Box component="main" sx={{ flexGrow: 1, ml: hideNavbar ? 0 : '20px' }}>
           <Routes>
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />

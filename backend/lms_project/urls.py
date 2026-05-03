@@ -6,11 +6,15 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
+from quizzes import views as quiz_views
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/', include('accounts.urls')),
     path('api/courses/', include('courses.urls')),
     path('api/assignments/', include('assignments.urls')),
+    # Ensure /api/quizzes/<id>/export/ always resolves to the export view
+    path('api/quizzes/<int:quiz_id>/export/', quiz_views.export_quiz, name='export_quiz_root'),
     path('api/quizzes/', include('quizzes.urls')),
     path('api/announcements/', include('announcements.urls')),
     path('api/discussions/', include('discussions.urls')),
@@ -19,4 +23,3 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-

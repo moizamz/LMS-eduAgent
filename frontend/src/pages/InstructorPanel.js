@@ -124,7 +124,7 @@ const InstructorPanel = () => {
                   <Button size="small" onClick={() => navigate(`/courses/${course.id}`)}>
                     View
                   </Button>
-                  <Button size="small" startIcon={<Edit />}>
+                  <Button size="small" startIcon={<Edit />} onClick={() => navigate(`/courses/${course.id}/`)}>
                     Edit
                   </Button>
                   <Button

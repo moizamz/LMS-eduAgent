@@ -1,6 +1,7 @@
 from rest_framework import generics, status, permissions, serializers
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
 from .models import Assignment, AssignmentSubmission
 from .serializers import AssignmentSerializer, AssignmentSubmissionSerializer
@@ -10,6 +11,7 @@ from courses.models import Course, Enrollment
 class AssignmentListView(generics.ListCreateAPIView):
     serializer_class = AssignmentSerializer
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
     
     def get_queryset(self):
         course_id = self.request.query_params.get('course_id')
@@ -45,6 +47,7 @@ class AssignmentListView(generics.ListCreateAPIView):
 class AssignmentDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = AssignmentSerializer
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
     
     def get_queryset(self):
         if self.request.user.is_admin:
@@ -84,7 +87,11 @@ def submit_assignment(request, assignment_id):
         return Response({'error': 'Already submitted. Update existing submission instead.'}, 
                        status=status.HTTP_400_BAD_REQUEST)
     
-    submission.submission_file = request.FILES.get('submission_file')
+    submission_file = request.FILES.get('submission_file')
+    if submission_file and submission_file.size > 50 * 1024 * 1024:
+        return Response({'error': 'File too large. Maximum size is 50MB.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    submission.submission_file = submission_file
     submission.submission_text = request.data.get('submission_text', '')
     submission.save()
     
@@ -109,7 +116,11 @@ def update_submission(request, submission_id):
                        status=status.HTTP_400_BAD_REQUEST)
     
     if request.FILES.get('submission_file'):
-        submission.submission_file = request.FILES['submission_file']
+        submission_file = request.FILES['submission_file']
+        if submission_file.size > 50 * 1024 * 1024:
+            return Response({'error': 'File too large. Maximum size is 50MB.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        submission.submission_file = submission_file
     if request.data.get('submission_text'):
         submission.submission_text = request.data['submission_text']
     submission.save()

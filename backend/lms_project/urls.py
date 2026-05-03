@@ -19,6 +19,7 @@ urlpatterns = [
     path('api/announcements/', include('announcements.urls')),
     path('api/discussions/', include('discussions.urls')),
     path('api/certificates/', include('certificates.urls')),
+    path('api/gamification/', include('gamification.urls')),
 ]
 
 if settings.DEBUG:

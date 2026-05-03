@@ -8,6 +8,7 @@ from django.db.models import Count, Avg
 from .models import (
     Quiz, Question, Choice, QuizAttempt, Answer,
     ChatSession, ChatMessage, ChatFile, PracticeSession,
+    StudentAdaptivePolicyState,
 )
 from .serializers import (
     QuizSerializer, QuestionSerializer, ChoiceSerializer,
@@ -646,8 +647,8 @@ def practice_session_complete(request, pk):
     answers = request.data.get('answers') or []
 
     try:
-       num_correct = int(num_correct)
-       duration_seconds = int(duration_seconds)
+        num_correct = int(num_correct)
+        duration_seconds = int(duration_seconds)
     except Exception:
         return Response({'error': 'Invalid num_correct or duration_seconds'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -660,4 +661,273 @@ def practice_session_complete(request, pk):
     session.save()
 
     return Response(PracticeSessionDetailSerializer(session).data)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def adaptive_practice_start(request):
+    """
+    Build a question bank via LLM, then start a practice session whose on-screen
+    sequence is chosen online by hybrid Q-learning + UCB (with a linear TD head).
+    """
+    import random
+
+    if not request.user.is_student:
+        return Response({'error': 'Only students can start adaptive practice'}, status=status.HTTP_403_FORBIDDEN)
+
+    course_id = request.data.get('course_id')
+    subsection_ids = request.data.get('subsection_ids') or []
+    try:
+        num_questions = int(request.data.get('num_questions', 5))
+    except (TypeError, ValueError):
+        num_questions = 5
+    try:
+        bank_multiplier = int(request.data.get('bank_multiplier', 3))
+    except (TypeError, ValueError):
+        bank_multiplier = 3
+
+    if not course_id:
+        return Response({'error': 'course_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+    if not subsection_ids:
+        return Response({'error': 'subsection_ids is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    num_questions = max(1, min(15, num_questions))
+    bank_multiplier = max(1, min(5, bank_multiplier))
+    bank_size = min(45, max(num_questions, num_questions * bank_multiplier))
+
+    try:
+        course = Course.objects.get(id=course_id)
+    except Course.DoesNotExist:
+        return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not Enrollment.objects.filter(student=request.user, course=course).exists():
+        return Response({'error': 'You are not enrolled in this course'}, status=status.HTTP_403_FORBIDDEN)
+
+    subsections = Subsection.objects.filter(
+        id__in=subsection_ids,
+        pdf_file__isnull=False,
+        section__course_id=course.id,
+    ).exclude(pdf_file='').select_related('section', 'section__course')
+
+    if not subsections.exists():
+        return Response({'error': 'No valid subsections with PDF found for this course'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from quizzes.llm_service import extract_text_from_pdf, generate_questions_with_fallback
+    from quizzes.adaptive_practice import (
+        accuracy_bucket,
+        arm_index,
+        merge_loaded_policy,
+        normalize_question,
+        pack_state,
+        select_next_bank_id,
+        time_bucket,
+        total_bandit_pulls,
+    )
+
+    lecture_contents = []
+    for sub in subsections:
+        try:
+            path = sub.pdf_file.path
+        except (ValueError, AttributeError):
+            continue
+        text = extract_text_from_pdf(path)
+        lecture_contents.append({
+            'title': f"{sub.section.title} - {sub.title}",
+            'text': text[:15000] if text else '[No text extracted]',
+        })
+
+    if not lecture_contents:
+        return Response({'error': 'No lecture content could be extracted'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        raw_bank = generate_questions_with_fallback(lecture_contents, num_questions=bank_size)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    bank = [normalize_question(q, i) for i, q in enumerate(raw_bank or [])]
+    if not bank:
+        return Response({'error': 'No questions generated for adaptive bank'}, status=status.HTTP_400_BAD_REQUEST)
+
+    pol, _ = StudentAdaptivePolicyState.objects.get_or_create(
+        student=request.user,
+        course=course,
+        defaults={'q_table': {}, 'bandit': {}, 'lin_weights': []},
+    )
+    q_table, bandit, lin_w = merge_loaded_policy(pol.q_table, pol.bandit, pol.lin_weights)
+
+    rng = random.Random()
+    used: set = set()
+    s0 = pack_state(2, time_bucket(None), accuracy_bucket(0, 0))
+    tb_pulls = total_bandit_pulls(bandit)
+    bid, arm = select_next_bank_id(s0, q_table, bandit, lin_w, bank, used, rng, tb_pulls)
+    if bid < 0:
+        return Response({'error': 'Could not select a question from bank'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    used.add(bid)
+    first_q = next(q for q in bank if int(q['bank_id']) == bid)
+
+    session = PracticeSession.objects.create(
+        student=request.user,
+        course=course,
+        num_questions=num_questions,
+        num_correct=0,
+        data={
+            'mode': 'adaptive',
+            'bank': bank,
+            'used_bids': sorted(used),
+            'adaptive': {
+                'last_state': s0,
+                'last_arm': arm,
+                'pending_bid': bid,
+                'answered': 0,
+                'session_correct': 0,
+                'log': [],
+            },
+        },
+    )
+
+    return Response({
+        'session_id': session.id,
+        'total_questions': num_questions,
+        'bank_size': len(bank),
+        'question': first_q,
+        'policy': 'tabular_q_ucb_linear_td',
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def adaptive_practice_step(request, pk):
+    """After answering the current question, update the policy and receive the next one (if any)."""
+    import random
+
+    if not request.user.is_student:
+        return Response({'error': 'Only students can continue adaptive practice'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        session = PracticeSession.objects.get(id=pk, student=request.user)
+    except PracticeSession.DoesNotExist:
+        return Response({'error': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    data = session.data or {}
+    if data.get('mode') != 'adaptive':
+        return Response({'error': 'Not an adaptive practice session'}, status=status.HTTP_400_BAD_REQUEST)
+
+    is_correct = request.data.get('is_correct')
+    time_seconds = request.data.get('time_seconds')
+    if is_correct is None:
+        return Response({'error': 'is_correct is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    is_correct = bool(is_correct)
+
+    from quizzes.adaptive_practice import (
+        accuracy_bucket,
+        bandit_update,
+        merge_loaded_policy,
+        pack_state,
+        q_learning_update,
+        select_next_bank_id,
+        shaped_reward,
+        td_update_lin,
+        time_bucket,
+        total_bandit_pulls,
+    )
+
+    ad = data.get('adaptive') or {}
+    bank = data.get('bank') or []
+    if not bank or not isinstance(ad, dict):
+        return Response({'error': 'Corrupt session data'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        pending_bid = int(ad.get('pending_bid', -1))
+        last_state = int(ad.get('last_state', 0))
+        last_arm = int(ad.get('last_arm', 0))
+        answered = int(ad.get('answered', 0))
+        session_correct = int(ad.get('session_correct', 0))
+    except (TypeError, ValueError):
+        return Response({'error': 'Invalid adaptive session state'}, status=status.HTTP_400_BAD_REQUEST)
+
+    pol = StudentAdaptivePolicyState.objects.filter(student=request.user, course=session.course).first()
+    if not pol:
+        pol = StudentAdaptivePolicyState.objects.create(
+            student=request.user,
+            course=session.course,
+            q_table={},
+            bandit={},
+            lin_weights=[],
+        )
+
+    q_table, bandit, lin_w = merge_loaded_policy(pol.q_table, pol.bandit, pol.lin_weights)
+
+    r = shaped_reward(is_correct, time_seconds)
+    answered_next = answered + 1
+    session_correct_next = session_correct + (1 if is_correct else 0)
+    prev_code = 1 if is_correct else 0
+    tb = time_bucket(time_seconds)
+    acc_b = accuracy_bucket(session_correct_next, answered_next)
+    s_next = pack_state(prev_code, tb, acc_b)
+
+    q_learning_update(q_table, last_state, last_arm, r, s_next)
+    bandit_update(bandit, last_arm, r)
+    td_update_lin(lin_w, last_state, last_arm, r, s_next)
+
+    pol.q_table = q_table
+    pol.bandit = bandit
+    pol.lin_weights = lin_w
+    pol.save()
+
+    log = list(ad.get('log') or [])
+    log.append({
+        'bank_id': pending_bid,
+        'is_correct': is_correct,
+        'time_seconds': time_seconds,
+        'reward': r,
+    })
+
+    ad['answered'] = answered_next
+    ad['session_correct'] = session_correct_next
+    ad['log'] = log
+
+    if answered_next >= session.num_questions:
+        data['adaptive'] = ad
+        session.data = data
+        session.save(update_fields=['data'])
+        return Response({
+            'done': True,
+            'step': answered_next,
+            'session_correct': session_correct_next,
+        })
+
+    used = set(int(x) for x in (data.get('used_bids') or []))
+    rng = random.Random()
+    tb_pulls = total_bandit_pulls(bandit)
+    next_bid, next_arm = select_next_bank_id(s_next, q_table, bandit, lin_w, bank, used, rng, tb_pulls)
+    if next_bid < 0:
+        data['adaptive'] = ad
+        session.data = data
+        session.save(update_fields=['data'])
+        return Response({
+            'done': True,
+            'step': answered_next,
+            'session_correct': session_correct_next,
+            'bank_exhausted': True,
+        })
+
+    used.add(next_bid)
+    data['used_bids'] = sorted(used)
+    ad['last_state'] = s_next
+    ad['last_arm'] = next_arm
+    ad['pending_bid'] = next_bid
+    data['adaptive'] = ad
+    session.data = data
+    session.save(update_fields=['data'])
+
+    next_q = next(q for q in bank if int(q['bank_id']) == next_bid)
+    return Response({
+        'done': False,
+        'step': answered_next + 1,
+        'total_questions': session.num_questions,
+        'question': next_q,
+        'session_correct': session_correct_next,
+    })
 

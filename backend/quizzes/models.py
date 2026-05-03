@@ -163,6 +163,34 @@ class ChatFile(models.Model):
         return self.file.name
 
 
+class StudentAdaptivePolicyState(models.Model):
+    """
+    Persistent hybrid policy (tabular Q + UCB bandits + linear TD head) per student/course.
+    Updated after each adaptive practice step so later sessions personalize from history.
+    """
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='adaptive_practice_policies',
+        limit_choices_to={'role': 'student'},
+    )
+    course = models.ForeignKey(
+        Course,
+        on_delete=models.CASCADE,
+        related_name='adaptive_practice_policies',
+    )
+    q_table = models.JSONField(default=dict)
+    bandit = models.JSONField(default=dict)
+    lin_weights = models.JSONField(default=list)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['student', 'course']
+
+    def __str__(self):
+        return f"{self.student.username} adaptive {self.course_id}"
+
+
 class PracticeSession(models.Model):
     """Stores one practice run for a student."""
     student = models.ForeignKey(

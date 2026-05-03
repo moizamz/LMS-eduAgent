@@ -1,16 +1,287 @@
 """
-RAG pipeline + Ollama (Llama3) for generating quiz questions from lecture content.
-Chunks PDF text, retrieves relevant context, and uses local LLM with robust JSON parsing.
-Uses streaming to avoid hanging and provide real-time progress updates.
+RAG pipeline for generating quiz questions from lecture content.
+Provider order (low latency first): Groq → Google Gemini → local Ollama.
+Chunks PDF text, retrieves relevant context, with robust JSON parsing.
+Ollama uses streaming to avoid hanging and provide real-time progress updates.
 """
 
 import json
+import os
 import re
 import time
 import logging
 import threading
+import warnings
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def get_groq_api_key() -> str:
+    """Resolve Groq API key from Django settings (.env via decouple) or os.environ."""
+    try:
+        from django.conf import settings
+
+        k = getattr(settings, "GROQ_API_KEY", None) or ""
+        k = str(k).strip()
+        if k:
+            return k
+    except Exception:
+        pass
+    return (os.environ.get("GROQ_API_KEY") or "").strip()
+
+
+def get_groq_model() -> str:
+    try:
+        from django.conf import settings
+
+        m = getattr(settings, "GROQ_MODEL", None) or ""
+        m = str(m).strip()
+        if m:
+            return m
+    except Exception:
+        pass
+    return (os.environ.get("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
+
+
+def call_groq_text(user_prompt: str, log_label: str = "Groq") -> Optional[str]:
+    """
+    Single-turn chat completion via Groq (OpenAI-compatible HTTP API).
+    Returns plain text or None if unavailable / failed / empty.
+    """
+    api_key = get_groq_api_key()
+    if not api_key:
+        logger.info("[%s] Skipped: no GROQ_API_KEY", log_label)
+        print(f"[{log_label}] No GROQ_API_KEY — skipping Groq.")
+        return None
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        logger.warning("[%s] openai package not available: %s", log_label, e)
+        print(f"[{log_label}] Install openai for Groq: pip install openai")
+        return None
+
+    model = get_groq_model()
+    try:
+        logger.info("[%s] Calling Groq model=%s", log_label, model)
+        print(f"[{log_label}] Trying Groq model={model} …")
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=0.35,
+            max_tokens=8192,
+        )
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        msg = getattr(choice, "message", None) if choice else None
+        text = (getattr(msg, "content", None) or "").strip() if msg else ""
+        if text:
+            print(f"[{log_label}] Success ({len(text)} chars)")
+            return text
+        logger.warning("[%s] Empty Groq response", log_label)
+    except Exception as e:
+        logger.warning("[%s] Groq failed: %s", log_label, e)
+        print(f"[{log_label}] Groq failed: {e}")
+    return None
+
+
+def get_gemini_api_key() -> str:
+    """
+    Resolve Gemini API key: Django settings first (from backend/.env via decouple),
+    then os.environ. Decouple's config() does not populate os.environ, so only
+    checking os.environ misses keys that live solely in .env.
+    """
+    try:
+        from django.conf import settings
+
+        k = getattr(settings, "GEMINI_API_KEY", None) or ""
+        k = str(k).strip()
+        if k:
+            return k
+    except Exception:
+        pass
+    return (os.environ.get("GEMINI_API_KEY") or "").strip()
+
+
+def _gemini_discover_model_ids(genai) -> List[str]:
+    """Use ListModels so we only call generateContent on IDs the API actually exposes."""
+    found: List[str] = []
+    try:
+        for m in genai.list_models():
+            methods = list(getattr(m, "supported_generation_methods", []) or [])
+            if "generateContent" not in methods:
+                continue
+            raw = (getattr(m, "name", None) or "").strip()
+            if not raw:
+                continue
+            short = raw.split("/")[-1] if "/" in raw else raw
+            if short.lower().startswith("gemini"):
+                found.append(short)
+    except Exception as e:
+        logger.info("Gemini list_models unavailable: %s", e)
+
+    def sort_key(n: str) -> tuple:
+        u = n.lower()
+        gen = 0 if any(x in u for x in ("2.5", "2.0", "exp")) else 1
+        role = 0 if "flash" in u else 1
+        return (gen, role, n)
+
+    found.sort(key=sort_key)
+    return found
+
+
+def _gemini_static_fallback_ids() -> List[str]:
+    """Versioned / preview IDs for when list_models is empty or outdated."""
+    return [
+        "gemini-2.5-flash-preview-05-20",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-001",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro-002",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
+
+
+def _gemini_build_candidate_list(genai) -> List[str]:
+    """Ordered, deduplicated model IDs: settings override, API discovery, static fallbacks."""
+    seen = set()
+    out: List[str] = []
+
+    def push(mid: Optional[str]) -> None:
+        s = (mid or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    try:
+        from django.conf import settings
+
+        push(getattr(settings, "GEMINI_MODEL", None))
+    except Exception:
+        pass
+
+    for mid in _gemini_discover_model_ids(genai):
+        push(mid)
+
+    for mid in _gemini_static_fallback_ids():
+        push(mid)
+
+    return out
+
+
+def _ollama_parse_model_ids(models_response) -> List[str]:
+    rows = (
+        models_response.get("models")
+        if isinstance(models_response, dict)
+        else getattr(models_response, "models", None) or []
+    )
+    names: List[str] = []
+    for item in rows:
+        if isinstance(item, dict):
+            nid = item.get("model") or item.get("name")
+        else:
+            nid = getattr(item, "model", None) or getattr(item, "name", None)
+        if nid:
+            names.append(str(nid))
+    return names
+
+
+def choose_ollama_model(model_ids: List[str]) -> str:
+    """Pick OLLAMA_MODEL from env/settings if installed, else first llama3* tag."""
+    pref = (os.environ.get("OLLAMA_MODEL") or "").strip()
+    try:
+        from django.conf import settings
+
+        pref = pref or (getattr(settings, "OLLAMA_MODEL", None) or "").strip()
+    except Exception:
+        pass
+    if pref and pref in model_ids:
+        return pref
+    for n in model_ids:
+        if "llama3" in n.lower():
+            return n
+    if model_ids:
+        return model_ids[0]
+    raise ValueError("No Ollama models reported by server")
+
+
+def call_gemini_text(user_prompt: str, log_label: str = "Gemini") -> Optional[str]:
+    """
+    Run a single user-style prompt on Gemini. Returns plain text or None if
+    unavailable / all models failed / empty response.
+    """
+    api_key = get_gemini_api_key()
+    if not api_key:
+        logger.info("[%s] Skipped: no GEMINI_API_KEY in Django settings or environment", log_label)
+        print(f"[{log_label}] No API key — add GEMINI_API_KEY to backend/.env (see lms_project/settings.py). Using Ollama fallback if configured.")
+        return None
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            import google.generativeai as genai
+    except ImportError as e:
+        logger.warning("[%s] google-generativeai not installed: %s", log_label, e)
+        print(f"[{log_label}] Install: pip install google-generativeai")
+        return None
+
+    genai.configure(api_key=api_key)
+    candidates = _gemini_build_candidate_list(genai)
+    if candidates:
+        print(f"[{log_label}] Gemini candidate models ({len(candidates)}): {', '.join(candidates[:6])}{'…' if len(candidates) > 6 else ''}")
+
+    last_err: Optional[Exception] = None
+    for model_name in candidates:
+        for attempt in (0, 1):
+            try:
+                logger.info("[%s] Calling model=%s attempt=%s", log_label, model_name, attempt)
+                print(f"[{log_label}] Trying Google Gemini model={model_name} …")
+                model = genai.GenerativeModel(model_name)
+                resp = model.generate_content(user_prompt)
+                fb = getattr(resp, "prompt_feedback", None)
+                if fb and getattr(fb, "block_reason", None):
+                    logger.warning("[%s] Blocked by safety filters: %s", log_label, fb.block_reason)
+                    last_err = RuntimeError(f"blocked: {fb.block_reason}")
+                    break
+                text = getattr(resp, "text", None)
+                if not text and getattr(resp, "candidates", None):
+                    try:
+                        text = resp.candidates[0].content.parts[0].text
+                    except Exception:
+                        text = ""
+                text = (text or "").strip()
+                if text:
+                    print(f"[{log_label}] Success with model={model_name} ({len(text)} chars)")
+                    return text
+                last_err = RuntimeError("empty response text")
+                break
+            except Exception as e:
+                last_err = e
+                err_s = str(e).lower()
+                is_rate = "429" in str(e) or "resource exhausted" in err_s or "quota" in err_s
+                if attempt == 0 and is_rate:
+                    wait_s = 4.0
+                    m = re.search(r"retry in ([\d.]+)\s*s", err_s)
+                    if m:
+                        try:
+                            wait_s = min(35.0, float(m.group(1)) + 1.0)
+                        except ValueError:
+                            pass
+                    logger.warning("[%s] Rate limited on %s; retry in %.1fs", log_label, model_name, wait_s)
+                    print(f"[{log_label}] Rate limited ({model_name}); waiting {wait_s:.0f}s once…")
+                    time.sleep(wait_s)
+                    continue
+                logger.warning("[%s] Model %s failed: %s", log_label, model_name, e)
+                print(f"[{log_label}] Model {model_name} failed: {e}")
+                break
+
+    if last_err:
+        logger.warning("[%s] All Gemini models failed; last error: %s", log_label, last_err)
+        print(f"[{log_label}] All Gemini attempts failed ({last_err}). Falling back to Ollama if applicable.")
+    return None
 
 
 # ---------------------------------------------------------
@@ -80,19 +351,12 @@ def build_rag_context(lecture_contents, max_chars=8000):
 def generate_chat_reply_with_fallback(message, lecture_contents=None):
     """
     Chat with optional context extracted from uploaded files.
-    Tries Gemini first (if configured), falls back to local Ollama streaming.
+    Tries Groq first (low latency), then Gemini, then local Ollama streaming.
     """
-    import os
     lecture_contents = lecture_contents or []
     context = build_rag_context(lecture_contents, max_chars=8000)
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if api_key:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-pro")
-            prompt = f"""You are a helpful course assistant.
+    prompt = f"""You are a helpful course assistant.
 
 CONTEXT (from user uploaded files, may be empty):
 {context}
@@ -101,26 +365,22 @@ USER MESSAGE:
 {message}
 
 Answer clearly and concisely. If the context is insufficient, say what is missing."""
-            logger.info("[Gemini][Chat] Calling Gemini")
-            resp = model.generate_content(prompt)
-            text = getattr(resp, "text", None)
-            if not text and getattr(resp, "candidates", None):
-                try:
-                    text = resp.candidates[0].content.parts[0].text
-                except Exception:
-                    text = ""
-            if text and text.strip():
-                return text.strip()
-            logger.warning("[Gemini][Chat] Empty response, falling back to Ollama")
-        except Exception as e:
-            logger.warning("[Gemini][Chat] Gemini failed, falling back to Ollama: %s", e)
+    groq_text = call_groq_text(prompt, log_label="Groq:Chat")
+    if groq_text:
+        return groq_text
+    gemini_text = call_gemini_text(prompt, log_label="Gemini:Chat")
+    if gemini_text:
+        return gemini_text
 
     # Fallback: local Ollama
     try:
         import ollama
         client = ollama.Client(host="http://localhost:11434")
+        _names = _ollama_parse_model_ids(client.list())
+        ollama_model = choose_ollama_model(_names)
+        print(f"[LLM] Chat fallback Ollama model: {ollama_model}")
     except Exception as e:
-        raise ValueError(f"Neither Gemini nor Ollama is available. Ollama error: {e}")
+        raise ValueError(f"Neither Groq, Gemini, nor Ollama is available. Ollama error: {e}")
 
     system_prompt = "You are a helpful course assistant. Use the provided context when relevant."
     user_prompt = f"""CONTEXT:
@@ -131,7 +391,7 @@ USER MESSAGE:
 """
     return _call_ollama_streaming(
         client=client,
-        model="llama3.2:3b",
+        model=ollama_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -286,13 +546,10 @@ def generate_questions_from_content(lecture_contents, num_questions=5, chunk_siz
         import ollama
         client = ollama.Client(host="http://localhost:11434")
         models = client.list()
-        available = [
-            m.get("name") if isinstance(m, dict) else getattr(m, "name", str(m))
-            for m in (models.get("models") if isinstance(models, dict) else getattr(models, "models", []))
-        ]
+        available = _ollama_parse_model_ids(models)
         print(f"[LLM] Ollama is running. Available models: {available}")
-        if not any("llama3" in str(m) for m in available):
-            raise ValueError(f"llama3 model not found in Ollama. Available: {available}. Run: ollama pull llama3")
+        ollama_model = choose_ollama_model(available)
+        print(f"[LLM] Using Ollama model: {ollama_model}")
     except ValueError:
         raise
     except Exception as e:
@@ -389,7 +646,7 @@ Examples:
         try:
             content = _call_ollama_streaming(
                 client=client,
-                model="llama3.2:3b",
+                model=ollama_model,
                 messages=[{"role": "user", "content": user_prompt}],
                 options={"temperature": 0.5, "num_predict": 1500},
                 timeout_seconds=300
@@ -459,24 +716,55 @@ Examples:
     return questions[:num_questions]
 
 
+def _parse_mc_questions_from_llm_text(text: Optional[str], num_questions: int) -> List[dict]:
+    """Parse JSON array of MCQ objects from a single model response string."""
+    if not text or not isinstance(text, str):
+        return []
+    raw = safe_json_load(text)
+    if not raw or not isinstance(raw, list):
+        return []
+    num_questions = max(1, min(15, int(num_questions)))
+    questions = []
+    for i, q in enumerate(raw):
+        if not isinstance(q, dict):
+            continue
+        opts = q.get("options", [])
+        if not isinstance(opts, list) or len(opts) < 2:
+            continue
+        opts = [str(o).strip() for o in opts if str(o).strip()]
+        if len(opts) > 4:
+            opts = opts[:4]
+        if not opts:
+            continue
+        try:
+            marks_val = int(q.get("marks", 1))
+        except Exception:
+            marks_val = 1
+        correct_idx = int(q.get("correct_index", 0)) % len(opts)
+        questions.append({
+            "statement": str(q.get("statement", "")).strip() or f"Question {i+1}",
+            "options": opts,
+            "correct_index": correct_idx,
+            "explanation": str(q.get("explanation", "")).strip(),
+            "hint": str(q.get("hint", "")).strip(),
+            "marks": max(1, min(5, marks_val)),
+            "difficulty": q.get("difficulty") if q.get("difficulty") in ("easy", "medium", "hard") else "medium",
+            "taxonomy": q.get("taxonomy") if q.get("taxonomy") in ("remember", "understand", "apply", "analyze", "evaluate", "create") else "understand",
+        })
+    return questions[:num_questions]
+
+
 def generate_questions_with_fallback(lecture_contents, num_questions=5, chunk_size=1500):
     """
-    Try Gemini API first; if it fails or no key, fall back to local Ollama.
+    Try Groq first (low latency), then Gemini, then local Ollama.
     """
-    import os
     num_questions = max(1, min(15, int(num_questions)))
 
     context = build_rag_context(lecture_contents, max_chars=8000)
     if not context.strip():
         raise ValueError("No lecture content provided")
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if api_key:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-pro")
-            prompt = f"""Generate exactly {num_questions} multiple-choice questions from this lecture content.
+    prompt = f"""Generate exactly {num_questions} multiple-choice questions from this lecture content.
 
 LECTURE CONTENT:
 {context}
@@ -487,52 +775,17 @@ RULES:
 3. Distractors must be plausible. Do not repeat lecture titles in statements.
 4. Vary difficulty and taxonomy.
 """
-            logger.info("[Gemini] Calling Gemini for question generation")
-            resp = model.generate_content(prompt)
-            text = getattr(resp, "text", None)
-            if not text and getattr(resp, "candidates", None):
-                try:
-                    text = resp.candidates[0].content.parts[0].text
-                except Exception:
-                    text = ""
-            logger.info("[Gemini] Raw response length: %d", len(text or ""))
-            raw = safe_json_load(text)
-            if raw and isinstance(raw, list):
-                logger.info("[Gemini] Parsed %d questions from Gemini", len(raw))
-                # Reuse same normalization logic
-                questions = []
-                for i, q in enumerate(raw):
-                    if not isinstance(q, dict):
-                        continue
-                    opts = q.get("options", [])
-                    if not isinstance(opts, list) or len(opts) < 2:
-                        continue
-                    opts = [str(o).strip() for o in opts if str(o).strip()]
-                    if len(opts) > 4:
-                        opts = opts[:4]
-                    if not opts:
-                        continue
-                    try:
-                        marks_val = int(q.get("marks", 1))
-                    except Exception:
-                        marks_val = 1
-                    correct_idx = int(q.get("correct_index", 0)) % len(opts)
-                    questions.append({
-                        "statement": str(q.get("statement", "")).strip() or f"Question {i+1}",
-                        "options": opts,
-                        "correct_index": correct_idx,
-                        "explanation": str(q.get("explanation", "")).strip(),
-                        "hint": str(q.get("hint", "")).strip(),
-                        "marks": max(1, min(5, marks_val)),
-                        "difficulty": q.get("difficulty") if q.get("difficulty") in ("easy", "medium", "hard") else "medium",
-                        "taxonomy": q.get("taxonomy") if q.get("taxonomy") in ("remember", "understand", "apply", "analyze", "evaluate", "create") else "understand",
-                    })
-                return questions[:num_questions]
-            logger.warning("[Gemini] Could not parse valid JSON from Gemini response, falling back to Ollama")
-        except Exception as e:
-            logger.warning("[Gemini] Gemini generation failed, falling back to Ollama: %s", e)
+    groq_q = _parse_mc_questions_from_llm_text(call_groq_text(prompt, log_label="Groq:Questions"), num_questions)
+    if groq_q:
+        logger.info("[LLM] Parsed %d questions from Groq", len(groq_q))
+        return groq_q
 
-    # Fallback to local Ollama
+    gem_q = _parse_mc_questions_from_llm_text(call_gemini_text(prompt, log_label="Gemini:Questions"), num_questions)
+    if gem_q:
+        logger.info("[LLM] Parsed %d questions from Gemini", len(gem_q))
+        return gem_q
+
+    logger.warning("[LLM] Groq + Gemini failed or invalid JSON; falling back to Ollama")
     return generate_questions_from_content(lecture_contents, num_questions=num_questions, chunk_size=chunk_size)
 
 

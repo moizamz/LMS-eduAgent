@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Container,
@@ -33,14 +33,24 @@ import {
   Collapse,
   Menu,
   Paper,
+  Alert,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
 } from '@mui/material';
 import {
   PlayArrow, Description, Link as LinkIcon, TextFields,
   Add, Delete, UploadFile, Folder, InsertDriveFile, GetApp, AutoAwesome, Edit, Lightbulb, FileDownload, FileUpload,
+  EmojiEvents,
 } from '@mui/icons-material';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 import { useAuth } from '../contexts/AuthContext';
+import EngagementLoadingOverlay from '../components/EngagementLoadingOverlay';
+import CourseGamificationProgressTab from '../components/CourseGamificationProgressTab';
+import { LLM_WAIT_MESSAGES, PRACTICE_WAIT_MESSAGES, CHAT_WAIT_MESSAGES } from '../constants/loadingEngagement';
 
 const CourseDetail = () => {
   const { id } = useParams();
@@ -122,6 +132,35 @@ const CourseDetail = () => {
   const [practiceChecked, setPracticeChecked] = useState(false);
   const [practiceShowHint, setPracticeShowHint] = useState(false);
   const [practiceWasCorrect, setPracticeWasCorrect] = useState(null);
+  const [practiceSessionId, setPracticeSessionId] = useState(null);
+  const [practiceSessionStartMs, setPracticeSessionStartMs] = useState(null);
+  const [practiceStepDisplay, setPracticeStepDisplay] = useState(1);
+  const [practiceStepTotal, setPracticeStepTotal] = useState(5);
+  const [practiceShownAtMs, setPracticeShownAtMs] = useState(null);
+  const [practiceAnswerLog, setPracticeAnswerLog] = useState([]);
+
+  const [gamificationSummary, setGamificationSummary] = useState(null);
+  const [engagementFeed, setEngagementFeed] = useState([]);
+  const [leaderboardOpen, setLeaderboardOpen] = useState(false);
+  const [leaderboardRows, setLeaderboardRows] = useState([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+
+  const refreshGamification = useCallback(async () => {
+    if (user?.role !== 'student' || !enrolled || !id) return;
+    try {
+      const res = await api.get(`/gamification/course/${id}/summary/`);
+      setGamificationSummary(res.data);
+    } catch (_) {
+      /* ignore */
+    }
+  }, [user?.role, enrolled, id]);
+
+  const pushEngagement = useCallback((entry) => {
+    setEngagementFeed((prev) => {
+      const row = { ...entry, id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}` };
+      return [row, ...prev].slice(0, 14);
+    });
+  }, []);
 
   useEffect(() => {
     fetchCourse();
@@ -130,6 +169,62 @@ const CourseDetail = () => {
     fetchAssignments();
     fetchChatSessions();
   }, [id]);
+
+  useEffect(() => {
+    if (tabValue === 6 && !(user?.role === 'student' && enrolled)) {
+      setTabValue(0);
+    }
+  }, [tabValue, user?.role, enrolled]);
+
+  useEffect(() => {
+    if (user?.role !== 'student' || !enrolled || !id) return;
+    let cancelled = false;
+    (async () => {
+      await refreshGamification();
+      if (cancelled) return;
+      const k = `gam_daily_${id}_${new Date().toDateString()}`;
+      if (sessionStorage.getItem(k)) {
+        await refreshGamification();
+        return;
+      }
+      try {
+        const ev = await api.post('/gamification/events/', {
+          course_id: id,
+          event_type: 'daily_login',
+          metadata: {},
+        });
+        sessionStorage.setItem(k, '1');
+        if (!cancelled && ev.data?.remark) {
+          pushEngagement({
+            headline: ev.data.points_awarded > 0 ? 'Daily check-in' : 'Welcome back',
+            body: ev.data.remark,
+            sub: ev.data.points_awarded > 0 ? `+${ev.data.points_awarded} XP · ${ev.data.bandit_arm || ''}` : '',
+            badges: ev.data.badges || [],
+          });
+        }
+        await refreshGamification();
+      } catch (_) {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.role, enrolled, id, refreshGamification, pushEngagement]);
+
+  const openLeaderboard = async () => {
+    setLeaderboardOpen(true);
+    setLeaderboardLoading(true);
+    try {
+      const res = await api.get(`/gamification/course/${id}/leaderboard/`, { params: { limit: 20 } });
+      setLeaderboardRows(res.data?.entries || []);
+    } catch (e) {
+      toast.error(e?.response?.data?.error || 'Could not load leaderboard');
+      setLeaderboardRows([]);
+    } finally {
+      setLeaderboardLoading(false);
+    }
+  };
 
   const fetchCourse = async () => {
     try {
@@ -265,23 +360,44 @@ const CourseDetail = () => {
     setPracticeChecked(false);
     setPracticeShowHint(false);
     setPracticeWasCorrect(null);
+    setPracticeSessionId(null);
+    setPracticeSessionStartMs(null);
+    setPracticeAnswerLog([]);
+    setPracticeStepDisplay(1);
+    setPracticeStepTotal(practiceNumQuestions);
+    setPracticeShownAtMs(null);
     try {
-      const res = await api.post('/quizzes/generate-questions/', {
-        timeout: 360000, 
-        subsection_ids: practiceSelectedLectureIds,
-        num_questions: practiceNumQuestions,
-      });
-      const qs = res.data.questions || [];
-      if (!qs.length) {
+      const res = await api.post(
+        '/quizzes/adaptive-practice/start/',
+        {
+          course_id: id,
+          subsection_ids: practiceSelectedLectureIds,
+          num_questions: practiceNumQuestions,
+          bank_multiplier: 3,
+        },
+        { timeout: 360000 }
+      );
+      const q = res.data.question;
+      if (!q) {
         toast.error('No questions generated');
         return;
       }
-      setPracticeQuestions(qs);
-      toast.success(`Generated ${qs.length} practice questions`);
+      setPracticeSessionId(res.data.session_id);
+      setPracticeSessionStartMs(Date.now());
+      setPracticeShownAtMs(Date.now());
+      setPracticeQuestions([q]);
+      setPracticeStepTotal(res.data.total_questions || practiceNumQuestions);
+      setPracticeStepDisplay(1);
+      pushEngagement({
+        headline: 'Adaptive practice online',
+        body: `Question bank: ${res.data.bank_size ?? '—'} items · this session: ${res.data.total_questions} questions.`,
+        sub: 'Hybrid policy is selecting your path. Good luck!',
+        flavor: 'practice',
+      });
     } catch (e) {
-      console.error('[Practice] Error generating questions:', e);
+      console.error('[Practice] Error starting adaptive practice:', e);
       console.error('[Practice] Response:', e?.response?.data);
-      toast.error(e?.response?.data?.error || e?.message || 'Failed to generate practice questions');
+      toast.error(e?.response?.data?.error || e?.message || 'Failed to start adaptive practice');
     } finally {
       setPracticeLoading(false);
     }
@@ -334,6 +450,25 @@ const CourseDetail = () => {
       toast.success(
         `Quiz submitted! Score: ${res.data.score !== null ? res.data.score.toFixed(1) : 0}%`
       );
+      try {
+        const scoreNum = res.data.score != null ? parseFloat(res.data.score) : 0;
+        const ev = await api.post('/gamification/events/', {
+          course_id: id,
+          event_type: 'quiz_submitted',
+          metadata: { score: scoreNum },
+        });
+        if (ev.data?.remark && (ev.data?.points_awarded > 0 || ev.data?.badges?.length)) {
+          pushEngagement({
+            headline: 'Quiz rewards',
+            body: ev.data.remark,
+            sub: `+${ev.data.points_awarded || 0} XP${ev.data.level_up ? ' · Level up!' : ''}`,
+            badges: ev.data.badges || [],
+          });
+        }
+        await refreshGamification();
+      } catch (_) {
+        /* optional */
+      }
       setReviewAttempt(res.data);
       setQuizReviewOpen(true);
       setQuizDialogOpen(false);
@@ -792,6 +927,26 @@ const CourseDetail = () => {
       await api.post(`/courses/${enrollment.id}/subsections/${subsectionId}/complete/`);
       const wasCompleted = (enrollment?.completed_subsection_ids || []).includes(subsectionId);
       toast.success(wasCompleted ? 'Marked as uncomplete' : 'Marked as complete');
+      if (!wasCompleted && user?.role === 'student') {
+        try {
+          const ev = await api.post('/gamification/events/', {
+            course_id: id,
+            event_type: 'lesson_completed',
+            metadata: { subsection_id: subsectionId },
+          });
+          if (ev.data?.remark && ev.data?.points_awarded > 0) {
+            pushEngagement({
+              headline: 'Lesson milestone',
+              body: ev.data.remark,
+              sub: `+${ev.data.points_awarded || 0} XP`,
+              badges: ev.data.badges || [],
+            });
+          }
+          await refreshGamification();
+        } catch (_) {
+          /* ignore */
+        }
+      }
       checkEnrollment();
       fetchCourse();
     } catch (error) {
@@ -855,6 +1010,111 @@ const CourseDetail = () => {
         )}
       </Box>
 
+      {user?.role === 'student' && enrolled && (
+        <Card variant="outlined" sx={{ mb: 2, borderColor: 'primary.light' }}>
+          <CardContent sx={{ py: 1.5 }}>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1.5, justifyContent: 'space-between' }}>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+                <EmojiEvents color="primary" />
+                <Typography variant="subtitle2" color="text.secondary">
+                  Engagement
+                </Typography>
+                {gamificationSummary?.state ? (
+                  <>
+                    <Chip size="small" color="primary" label={`Level ${gamificationSummary.state.level}`} />
+                    <Chip size="small" variant="outlined" label={`${gamificationSummary.state.total_xp} XP`} />
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`Streak ${gamificationSummary.state.current_streak_days}d`}
+                    />
+                    {gamificationSummary.badges?.length > 0 && (
+                      <Chip size="small" label={`${gamificationSummary.badges.length} badges`} />
+                    )}
+                  </>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    Complete activities to earn XP, badges, and personalized tips.
+                  </Typography>
+                )}
+              </Box>
+              <Button size="small" variant="outlined" startIcon={<EmojiEvents />} onClick={openLeaderboard}>
+                Leaderboard
+              </Button>
+            </Box>
+            {gamificationSummary?.recent_remarks?.[0]?.llm_remark && (
+              <Alert severity="info" sx={{ mt: 1.5 }} icon={false}>
+                <Typography variant="body2">{gamificationSummary.recent_remarks[0].llm_remark}</Typography>
+              </Alert>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {user?.role === 'student' && enrolled && engagementFeed.length > 0 && (
+        <Card
+          sx={{
+            mb: 2,
+            overflow: 'hidden',
+            background: 'linear-gradient(145deg, #faf5ff 0%, #ffffff 40%, #f5f3ff 100%)',
+            border: '1px solid rgba(139, 92, 246, 0.22)',
+            boxShadow: '0 4px 24px rgba(124, 58, 237, 0.08)',
+          }}
+        >
+          <CardContent sx={{ py: 2 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 800, color: '#5b21b6', mb: 1.5, letterSpacing: 0.3 }}>
+              Live learning analytics
+            </Typography>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+              Rewards, coach notes, and milestones land here (not as pop-up toasts) so you can skim the story of your session.
+            </Typography>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+              {engagementFeed.map((row) => (
+                <Box
+                  key={row.id}
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2,
+                    position: 'relative',
+                    background: 'linear-gradient(90deg, rgba(255,255,255,0.95), rgba(237,233,254,0.65))',
+                    border: '1px solid rgba(167, 139, 250, 0.45)',
+                    '&::before': {
+                      content: '""',
+                      position: 'absolute',
+                      left: 0,
+                      top: 8,
+                      bottom: 8,
+                      width: 4,
+                      borderRadius: 4,
+                      background: 'linear-gradient(180deg, #a78bfa, #7c3aed)',
+                    },
+                  }}
+                >
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: '#6d28d9', textTransform: 'uppercase', letterSpacing: 1 }}>
+                    {row.headline}
+                  </Typography>
+                  <Typography variant="body2" sx={{ mt: 0.75, lineHeight: 1.55 }}>
+                    {row.body}
+                  </Typography>
+                  {row.sub ? (
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: 'block' }}>
+                      {row.sub}
+                    </Typography>
+                  ) : null}
+                  {row.badges?.length > 0 && (
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+                      {row.badges.map((b) => (
+                        <Chip key={b.slug || b.title} size="small" color="secondary" variant="outlined" label={b.title || b.slug} />
+                      ))}
+                    </Box>
+                  )}
+                </Box>
+              ))}
+            </Box>
+          </CardContent>
+        </Card>
+      )}
+
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
         <Tabs value={tabValue} onChange={(e, newValue) => setTabValue(newValue)}>
           <Tab label="Modules" />
@@ -863,6 +1123,7 @@ const CourseDetail = () => {
           <Tab label="Discussions" />
           <Tab label="Chat" />
           <Tab label="Practice" />
+          {user?.role === 'student' && enrolled && <Tab label="Progress" />}
         </Tabs>
       </Box>
 
@@ -1262,6 +1523,24 @@ const CourseDetail = () => {
                                 try {
                                   await api.post(`/assignments/${a.id}/submit/`, formData);
                                   toast.success('Assignment submitted');
+                                  try {
+                                    const ev = await api.post('/gamification/events/', {
+                                      course_id: id,
+                                      event_type: 'assignment_submitted',
+                                      metadata: { assignment_id: a.id },
+                                    });
+                                    if (ev.data?.remark && ev.data?.points_awarded > 0) {
+                                      pushEngagement({
+                                        headline: 'Assignment turned in',
+                                        body: ev.data.remark,
+                                        sub: `+${ev.data.points_awarded || 0} XP`,
+                                        badges: ev.data.badges || [],
+                                      });
+                                    }
+                                    await refreshGamification();
+                                  } catch (_) {
+                                    /* ignore */
+                                  }
                                 } catch (err) {
                                   toast.error(err.response?.data?.error || 'Submission failed');
                                 } finally {
@@ -1430,7 +1709,12 @@ const CourseDetail = () => {
       )}
 
       {tabValue === 4 && (
-        <Card>
+        <Card sx={{ position: 'relative' }}>
+          <EngagementLoadingOverlay
+            active={chatSending}
+            messages={CHAT_WAIT_MESSAGES}
+            subtitle="Groq → Gemini → local model (fastest available wins)."
+          />
           <CardContent sx={{ display: 'flex', gap: 2, minHeight: 420 }}>
             {/* Left: sessions list */}
             <Box sx={{ width: 260, borderRight: 1, borderColor: 'divider', pr: 2, display: 'flex', flexDirection: 'column' }}>
@@ -1494,7 +1778,7 @@ const CourseDetail = () => {
             <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
               <Typography variant="h6" gutterBottom>Chat</Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                Upload files once per chat. Gemini is tried first; if it fails, the local LLM is used.
+                Upload files once per chat. We try Groq first for speed, then Gemini, then your local Ollama.
               </Typography>
 
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
@@ -1585,7 +1869,12 @@ const CourseDetail = () => {
       )}
 
       {tabValue === 5 && (
-        <Card>
+        <Card sx={{ position: 'relative', overflow: 'hidden' }}>
+          <EngagementLoadingOverlay
+            active={practiceLoading}
+            messages={PRACTICE_WAIT_MESSAGES}
+            subtitle="Building your adaptive bank (Groq → Gemini → local) — usually a few seconds on Groq."
+          />
           <CardContent>
             <Typography variant="h6" gutterBottom>Practice</Typography>
             {user?.role !== 'student' ? (
@@ -1593,7 +1882,9 @@ const CourseDetail = () => {
             ) : (
               <>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  Select lecture PDFs, generate questions, then attempt them one by one with hints and instant explanations.
+                  Select lecture PDFs to build a question bank. Each session serves items chosen by a hybrid policy
+                  (tabular Q-learning + UCB bandits + linear TD head) using difficulty, Bloom taxonomy, your accuracy
+                  so far, and time spent on the previous question. Prior sessions update personalization for this course.
                 </Typography>
 
                 <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', mb: 2 }}>
@@ -1631,15 +1922,24 @@ const CourseDetail = () => {
                   />
 
                   <Button variant="contained" startIcon={<AutoAwesome />} disabled={practiceLoading} onClick={handleGeneratePractice}>
-                    {practiceLoading ? 'Generating...' : 'Generate'}
+                    {practiceLoading ? 'Building bank…' : 'Start adaptive practice'}
                   </Button>
                 </Box>
 
                 {practiceQuestions.length > 0 && (
                   <Card variant="outlined" sx={{ p: 2 }}>
                     <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-                      Question {practiceIndex + 1} of {practiceQuestions.length}
+                      Question {practiceSessionId ? practiceStepDisplay : practiceIndex + 1} of{' '}
+                      {practiceSessionId ? practiceStepTotal : practiceQuestions.length}
                     </Typography>
+                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1 }}>
+                      {practiceQuestions[practiceIndex]?.difficulty && (
+                        <Chip size="small" label={`Difficulty: ${practiceQuestions[practiceIndex].difficulty}`} />
+                      )}
+                      {practiceQuestions[practiceIndex]?.taxonomy && (
+                        <Chip size="small" variant="outlined" label={`Taxonomy: ${practiceQuestions[practiceIndex].taxonomy}`} />
+                      )}
+                    </Box>
                     <Typography variant="subtitle1" sx={{ mb: 1 }}>
                       {practiceQuestions[practiceIndex]?.statement}
                     </Typography>
@@ -1681,7 +1981,7 @@ const CourseDetail = () => {
 
                     <Box sx={{ display: 'flex', gap: 1, mt: 2, justifyContent: 'space-between' }}>
                       <Button
-                        disabled={practiceIndex === 0}
+                        disabled={practiceSessionId ? true : practiceIndex === 0}
                         onClick={() => {
                           setPracticeIndex((i) => Math.max(0, i - 1));
                           setPracticeSelectedChoice(null);
@@ -1709,7 +2009,88 @@ const CourseDetail = () => {
                       ) : (
                         <Button
                           variant="contained"
-                          onClick={() => {
+                          onClick={async () => {
+                            if (practiceSessionId) {
+                              const elapsedSec =
+                                practiceShownAtMs != null ? (Date.now() - practiceShownAtMs) / 1000 : 0;
+                              const isCor = !!practiceWasCorrect;
+                              try {
+                                const res = await api.post(
+                                  `/quizzes/adaptive-practice/session/${practiceSessionId}/step/`,
+                                  {
+                                    is_correct: isCor,
+                                    time_seconds: elapsedSec,
+                                  }
+                                );
+                                const nextLog = [...practiceAnswerLog, { is_correct: isCor, time_seconds: elapsedSec }];
+                                setPracticeAnswerLog(nextLog);
+                                if (res.data.done) {
+                                  const numCorrect = nextLog.filter((x) => x.is_correct).length;
+                                  const durSec = practiceSessionStartMs
+                                    ? Math.max(0, Math.floor((Date.now() - practiceSessionStartMs) / 1000))
+                                    : 0;
+                                  try {
+                                    await api.post(`/quizzes/practice-sessions/${practiceSessionId}/complete/`, {
+                                      num_correct: numCorrect,
+                                      duration_seconds: durSec,
+                                      answers: nextLog,
+                                    });
+                                  } catch (ce) {
+                                    console.error('[Practice] complete', ce);
+                                  }
+                                  try {
+                                    const ev = await api.post('/gamification/events/', {
+                                      course_id: id,
+                                      event_type: 'practice_completed',
+                                      metadata: {
+                                        num_correct: numCorrect,
+                                        total_questions: practiceStepTotal || nextLog.length,
+                                      },
+                                    });
+                                    if (ev.data?.remark) {
+                                      pushEngagement({
+                                        headline: 'Practice wrap-up',
+                                        body: ev.data.remark,
+                                        sub: `+${ev.data.points_awarded || 0} XP · ${numCorrect}/${practiceStepTotal || nextLog.length} correct`,
+                                        badges: ev.data.badges || [],
+                                      });
+                                    }
+                                    await refreshGamification();
+                                  } catch (_) {
+                                    /* ignore */
+                                  }
+                                  pushEngagement({
+                                    headline: res.data.bank_exhausted ? 'Bank exhausted' : 'Session complete',
+                                    body: res.data.bank_exhausted
+                                      ? 'You cleared the adaptive bank — nice run.'
+                                      : 'You finished this adaptive session. Momentum looks good.',
+                                    sub: `${numCorrect} correct this round`,
+                                    flavor: 'practice',
+                                  });
+                                  setPracticeQuestions([]);
+                                  setPracticeSessionId(null);
+                                  setPracticeSessionStartMs(null);
+                                  setPracticeShownAtMs(null);
+                                  setPracticeAnswerLog([]);
+                                  return;
+                                }
+                                const nq = res.data.question;
+                                if (nq) {
+                                  setPracticeQuestions([nq]);
+                                  setPracticeIndex(0);
+                                  setPracticeStepDisplay(res.data.step ?? practiceStepDisplay + 1);
+                                  setPracticeShownAtMs(Date.now());
+                                }
+                                setPracticeSelectedChoice(null);
+                                setPracticeChecked(false);
+                                setPracticeShowHint(false);
+                                setPracticeWasCorrect(null);
+                              } catch (e) {
+                                console.error('[Practice] step', e);
+                                toast.error(e?.response?.data?.error || e?.message || 'Failed to fetch next question');
+                              }
+                              return;
+                            }
                             if (practiceIndex < practiceQuestions.length - 1) {
                               setPracticeIndex((i) => i + 1);
                               setPracticeSelectedChoice(null);
@@ -1721,7 +2102,14 @@ const CourseDetail = () => {
                             }
                           }}
                         >
-                          {practiceIndex < practiceQuestions.length - 1 ? 'Next' : 'Finish'}
+                          {practiceSessionId
+                            ? practiceChecked &&
+                              practiceStepDisplay === practiceStepTotal
+                              ? 'Finish'
+                              : 'Next'
+                            : practiceIndex < practiceQuestions.length - 1
+                              ? 'Next'
+                              : 'Finish'}
                         </Button>
                       )}
                     </Box>
@@ -1731,6 +2119,18 @@ const CourseDetail = () => {
             )}
           </CardContent>
         </Card>
+      )}
+
+      {user?.role === 'student' && enrolled && tabValue === 6 && (
+        <Box>
+          <Typography variant="h6" gutterBottom sx={{ fontWeight: 700, color: '#4c1d95' }}>
+            Progress & rewards (this course)
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Track XP from logged events, badge unlocks, and how your activity mixes over time.
+          </Typography>
+          <CourseGamificationProgressTab courseId={id} />
+        </Box>
       )}
 
       {tabValue === 2 && (
@@ -2262,7 +2662,12 @@ const CourseDetail = () => {
               )}
 
               {createQuizTab === 1 && !editingQuiz && (
-                <Box sx={{ py: 2 }}>
+                <Box sx={{ py: 2, position: 'relative', minHeight: generateLoading ? 200 : undefined }}>
+                  <EngagementLoadingOverlay
+                    active={generateLoading}
+                    messages={LLM_WAIT_MESSAGES}
+                    subtitle="Provider chain: Groq (fast) → Gemini → local Ollama."
+                  />
                   <TextField
                     label="Number of questions to generate"
                     type="number"
@@ -2342,6 +2747,46 @@ const CourseDetail = () => {
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={leaderboardOpen} onClose={() => setLeaderboardOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Course leaderboard (XP)</DialogTitle>
+        <DialogContent>
+          {leaderboardLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+              <CircularProgress size={28} />
+            </Box>
+          ) : (
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>#</TableCell>
+                  <TableCell>Student</TableCell>
+                  <TableCell align="right">XP</TableCell>
+                  <TableCell align="right">Level</TableCell>
+                  <TableCell align="right">Streak</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {leaderboardRows.map((row) => (
+                  <TableRow key={`${row.rank}-${row.username}`} selected={row.is_you}>
+                    <TableCell>{row.rank}</TableCell>
+                    <TableCell>
+                      {row.display_name || row.username}
+                      {row.is_you ? ' (you)' : ''}
+                    </TableCell>
+                    <TableCell align="right">{row.total_xp}</TableCell>
+                    <TableCell align="right">{row.level}</TableCell>
+                    <TableCell align="right">{row.current_streak_days}d</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setLeaderboardOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 };

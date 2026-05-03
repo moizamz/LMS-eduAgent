@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Container,
   Typography,
@@ -8,12 +9,16 @@ import {
   Box,
   CircularProgress,
   LinearProgress,
+  Button,
+  Chip,
 } from '@mui/material';
+import { EmojiEvents, TrendingUp } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../services/api';
 
 const Dashboard = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const isStudent = user?.role === 'student';
   const isInstructorLike = user?.role === 'instructor' || user?.role === 'admin';
 
@@ -36,6 +41,7 @@ const Dashboard = () => {
   const [instructorEnrollments, setInstructorEnrollments] = useState([]);
   const [instructorAttempts, setInstructorAttempts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [rewardDash, setRewardDash] = useState(null);
 
   useEffect(() => {
     if (!user) return;
@@ -44,7 +50,7 @@ const Dashboard = () => {
       setLoading(true);
       try {
         if (isStudent) {
-          await Promise.all([fetchStats(), fetchEnrollments()]);
+          await Promise.all([fetchStats(), fetchEnrollments(), fetchRewardDashboard()]);
         } else if (isInstructorLike) {
           await fetchInstructorData();
         }
@@ -97,6 +103,16 @@ const Dashboard = () => {
       setEnrollments(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
       console.error('Error fetching enrollments:', error);
+    }
+  };
+
+  const fetchRewardDashboard = async () => {
+    try {
+      const res = await api.get('/gamification/student/dashboard/');
+      setRewardDash(res.data);
+    } catch (error) {
+      console.error('Error fetching gamification dashboard:', error);
+      setRewardDash(null);
     }
   };
 
@@ -507,6 +523,86 @@ const Dashboard = () => {
                 </Card>
               </Box>
             </Box>
+
+            {/* Rewards & XP snapshot */}
+            {isStudent && rewardDash && (
+              <Box sx={{ mb: 4 }}>
+                <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2 }}>
+                  Rewards & momentum
+                </Typography>
+                <Grid container spacing={3}>
+                  <Grid item xs={12} md={5}>
+                    <Card sx={statCardStyle}>
+                      <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                          <EmojiEvents sx={{ color: '#8b5cf6' }} />
+                          <Typography sx={{ color: '#757575', fontSize: '0.875rem' }}>
+                            Total XP (all courses)
+                          </Typography>
+                        </Box>
+                        <Typography variant="h3" sx={{ color: '#7c3aed', fontWeight: 800, lineHeight: 1.1 }}>
+                          {rewardDash.total_xp_across_courses ?? 0}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                          {rewardDash.badge_total ?? 0} badges unlocked across your enrollments.
+                        </Typography>
+                        <Box sx={{ flexGrow: 1 }} />
+                        <Button
+                          variant="contained"
+                          startIcon={<TrendingUp />}
+                          onClick={() => navigate('/my-progress')}
+                          sx={{ mt: 2, alignSelf: 'flex-start' }}
+                        >
+                          View full progress & charts
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                  <Grid item xs={12} md={7}>
+                    <Card sx={{ ...courseCardStyle, minHeight: 230 }}>
+                      <CardContent>
+                        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5 }}>
+                          Top courses by XP
+                        </Typography>
+                        {(rewardDash.courses || []).length === 0 ? (
+                          <Typography variant="body2" color="text.secondary">
+                            Enroll and complete activities to start earning XP.
+                          </Typography>
+                        ) : (
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+                            {(rewardDash.courses || []).slice(0, 4).map((c) => (
+                              <Box
+                                key={c.course_id}
+                                sx={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  flexWrap: 'wrap',
+                                  gap: 1,
+                                  py: 0.75,
+                                  px: 1,
+                                  borderRadius: 1,
+                                  bgcolor: '#faf5ff',
+                                }}
+                              >
+                                <Typography variant="body2" sx={{ fontWeight: 600, maxWidth: '70%' }}>
+                                  {c.course_title}
+                                </Typography>
+                                <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'center' }}>
+                                  <Chip size="small" label={`Lv ${c.level}`} color="primary" variant="outlined" />
+                                  <Chip size="small" label={`${c.total_xp} XP`} />
+                                  <Chip size="small" variant="outlined" label={`${c.current_streak_days}d streak`} />
+                                </Box>
+                              </Box>
+                            ))}
+                          </Box>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                </Grid>
+              </Box>
+            )}
 
             {/* My Courses Section */}
             {isStudent && (

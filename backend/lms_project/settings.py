@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'announcements',
     'discussions',
     'certificates',
+    'gamification',
 ]
 
 MIDDLEWARE = [
@@ -201,4 +202,15 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@lms.com')
+
+# Groq (OpenAI-compatible API, low latency). Used first when configured.
+GROQ_API_KEY = config('GROQ_API_KEY', default='')
+GROQ_MODEL = config('GROQ_MODEL', default='llama-3.1-8b-instant')
+
+# Google Gemini (used by quizzes.llm_service, gamification nudges). Load from .env — decouple does not set os.environ.
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
+GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-2.0-flash')
+
+# Local Ollama chat/generate model (e.g. llama3.2:latest). Empty = auto-pick first llama3* model.
+OLLAMA_MODEL = config('OLLAMA_MODEL', default='')
 

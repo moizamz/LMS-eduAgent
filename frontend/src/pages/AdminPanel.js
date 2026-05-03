@@ -18,8 +18,10 @@ import {
   Grid,
   Card,
   CardContent,
+  LinearProgress,
+  Divider,
 } from '@mui/material';
-import { Person, School, CheckCircle, Block } from '@mui/icons-material';
+import { Person, School, CheckCircle, Block, Analytics } from '@mui/icons-material';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 
@@ -28,6 +30,7 @@ const AdminPanel = () => {
   const [users, setUsers] = useState([]);
   const [courses, setCourses] = useState([]);
   const [analytics, setAnalytics] = useState(null);
+  const [eduagentAnalytics, setEduagentAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -48,9 +51,13 @@ const AdminPanel = () => {
       } else if (tabValue === 2) {
         const response = await api.get('/courses/analytics/');
         setAnalytics(response.data);
+      } else if (tabValue === 3) {
+        const response = await api.get('/quizzes/admin/eduagent-analytics/');
+        setEduagentAnalytics(response.data);
       }
     } catch (error) {
       console.error('Error fetching data:', error);
+      if (tabValue === 3) setEduagentAnalytics(null);
       toast.error('Failed to load data');
     } finally {
       setLoading(false);
@@ -108,6 +115,7 @@ const AdminPanel = () => {
           <Tab label="Users" />
           <Tab label="Courses" />
           <Tab label="Analytics" />
+          <Tab label="EduAgent" />
         </Tabs>
       </Box>
 
@@ -265,6 +273,234 @@ const AdminPanel = () => {
                 </Card>
               </Grid>
             </Grid>
+          )}
+
+          {tabValue === 3 && !loading && !eduagentAnalytics && (
+            <Typography color="text.secondary" sx={{ py: 4 }}>
+              EduAgent metrics could not be loaded (check admin role) or no adaptive sessions exist yet.
+            </Typography>
+          )}
+
+          {tabValue === 3 && eduagentAnalytics && (
+            <Box>
+              <Paper
+                elevation={0}
+                sx={{
+                  p: 2,
+                  mb: 3,
+                  textAlign: 'center',
+                  background: 'linear-gradient(135deg, #1e1b4b 0%, #4c1d95 55%, #6d28d9 100%)',
+                  color: '#fff',
+                }}
+              >
+                <Typography variant="overline" sx={{ letterSpacing: 4, opacity: 0.9 }}>
+                  EDUAGENT ANALYTICS DASHBOARD
+                </Typography>
+                <Typography variant="caption" display="block" sx={{ opacity: 0.85, mt: 0.5 }}>
+                  admin · adaptive banks & validation aggregates
+                </Typography>
+              </Paper>
+
+              <Grid container spacing={2} sx={{ mb: 3 }}>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Questions generated (kept)
+                      </Typography>
+                      <Typography variant="h4" sx={{ fontWeight: 800, color: '#4c1d95' }}>
+                        {(eduagentAnalytics.questions_generated_kept || 0).toLocaleString()}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        raw LLM rows: {(eduagentAnalytics.questions_generated_raw || 0).toLocaleString()}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Validation pass rate
+                      </Typography>
+                      <Typography variant="h4" sx={{ fontWeight: 800, color: '#4c1d95' }}>
+                        {eduagentAnalytics.validation_pass_rate_pct != null
+                          ? `${eduagentAnalytics.validation_pass_rate_pct}%`
+                          : '—'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Faithfulness score
+                      </Typography>
+                      <Typography variant="h4" sx={{ fontWeight: 800, color: '#4c1d95' }}>
+                        {eduagentAnalytics.faithfulness_score_pct != null
+                          ? `${eduagentAnalytics.faithfulness_score_pct}%`
+                          : '—'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Curated MCQs (DB)
+                      </Typography>
+                      <Typography variant="h4" sx={{ fontWeight: 800, color: '#4c1d95' }}>
+                        {(eduagentAnalytics.curated_question_bank_count || 0).toLocaleString()}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+
+              <Grid container spacing={3}>
+                <Grid item xs={12} md={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="h6" sx={{ fontWeight: 700, mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Analytics color="primary" />
+                        Difficulty distribution (bank items sampled)
+                      </Typography>
+                      {['easy', 'moderate', 'hard'].map((k) => {
+                        const pct =
+                          k === 'moderate'
+                            ? eduagentAnalytics.difficulty_distribution_pct?.moderate
+                            : eduagentAnalytics.difficulty_distribution_pct?.[k];
+                        const label = k === 'easy' ? 'Easy' : k === 'hard' ? 'Hard' : 'Moderate';
+                        return (
+                          <Box key={k} sx={{ mb: 1.5 }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <Typography variant="body2">{label}</Typography>
+                              <Typography variant="body2" fontWeight={600}>
+                                {pct ?? 0}%
+                              </Typography>
+                            </Box>
+                            <LinearProgress
+                              variant="determinate"
+                              value={Math.min(100, pct || 0)}
+                              sx={{ height: 10, borderRadius: 2, '& .MuiLinearProgress-bar': { bgcolor: '#7c3aed' } }}
+                            />
+                          </Box>
+                        );
+                      })}
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="h6" sx={{ fontWeight: 700, mb: 2 }}>
+                        Generation latency
+                      </Typography>
+                      <Typography variant="body1" gutterBottom>
+                        Average:{' '}
+                        <strong>{eduagentAnalytics.average_generation_time_sec ?? '—'} sec</strong>
+                      </Typography>
+                      <Typography variant="body1" gutterBottom>
+                        p95: <strong>{eduagentAnalytics.p95_latency_sec ?? '—'} sec</strong>
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        Samples: {eduagentAnalytics.latency_samples ?? 0} · Adaptive sessions scanned:{' '}
+                        {eduagentAnalytics.adaptive_sessions_scanned ?? 0}
+                        {eduagentAnalytics.generative_sessions_with_quality_report != null
+                          ? ` · Sessions w/ quality report: ${eduagentAnalytics.generative_sessions_with_quality_report}`
+                          : ''}
+                      </Typography>
+                      <Divider sx={{ my: 2 }} />
+                      <Typography variant="body1">
+                        Avg discrimination (proxy):{' '}
+                        <strong>{eduagentAnalytics.average_discrimination_proxy ?? '—'}</strong>
+                        {eduagentAnalytics.discrimination_samples != null
+                          ? ` · n=${eduagentAnalytics.discrimination_samples} strata buckets`
+                          : ''}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, mt: 3, mb: 1.5, color: '#312e81' }}>
+                LLM judge pipeline (second pass)
+              </Typography>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+                Aggregated from <code>quality_report.llm_judge</code> on adaptive + practice sessions after deterministic
+                checks.
+              </Typography>
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined" sx={{ borderColor: 'rgba(99,102,241,0.35)' }}>
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Judge sessions
+                      </Typography>
+                      <Typography variant="h4" sx={{ fontWeight: 800, color: '#4338ca' }}>
+                        {eduagentAnalytics.llm_judge_sessions ?? 0}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        degraded (fallback): {eduagentAnalytics.llm_judge_degraded_sessions ?? 0}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined" sx={{ borderColor: 'rgba(99,102,241,0.35)' }}>
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Mean session pass rate (judge)
+                      </Typography>
+                      <Typography variant="h4" sx={{ fontWeight: 800, color: '#4338ca' }}>
+                        {eduagentAnalytics.llm_judge_pass_rate_mean_pct != null
+                          ? `${eduagentAnalytics.llm_judge_pass_rate_mean_pct}%`
+                          : '—'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined" sx={{ borderColor: 'rgba(99,102,241,0.35)' }}>
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Avg judge scores (1–10)
+                      </Typography>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        Overall: {eduagentAnalytics.llm_judge_avg_overall_score ?? '—'}
+                      </Typography>
+                      <Typography variant="body2">
+                        Clarity: {eduagentAnalytics.llm_judge_avg_clarity ?? '—'} · Grounding:{' '}
+                        {eduagentAnalytics.llm_judge_avg_grounding ?? '—'}
+                      </Typography>
+                      <Typography variant="body2">
+                        Distractors: {eduagentAnalytics.llm_judge_avg_distractor_quality ?? '—'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={6} md={3}>
+                  <Card variant="outlined" sx={{ borderColor: 'rgba(99,102,241,0.35)' }}>
+                    <CardContent>
+                      <Typography color="text.secondary" variant="body2">
+                        Judge latency (batched calls)
+                      </Typography>
+                      <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                        Avg: {eduagentAnalytics.llm_judge_latency_avg_sec ?? '—'} sec
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        p95: {eduagentAnalytics.llm_judge_latency_p95_sec ?? '—'} sec
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                        Rejected items (sum): {eduagentAnalytics.llm_judge_rejected_items_total ?? 0}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+            </Box>
           )}
         </>
       )}

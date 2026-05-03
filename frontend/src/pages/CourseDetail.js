@@ -44,6 +44,7 @@ import {
   PlayArrow, Description, Link as LinkIcon, TextFields,
   Add, Delete, UploadFile, Folder, InsertDriveFile, GetApp, AutoAwesome, Edit, Lightbulb, FileDownload, FileUpload,
   EmojiEvents,
+  People,
 } from '@mui/icons-material';
 import api from '../services/api';
 import { toast } from 'react-toastify';
@@ -125,6 +126,7 @@ const CourseDetail = () => {
   // Practice tab (student)
   const [practiceSelectedLectureIds, setPracticeSelectedLectureIds] = useState([]);
   const [practiceNumQuestions, setPracticeNumQuestions] = useState(5);
+  const [practiceWarmupQuestions, setPracticeWarmupQuestions] = useState(5);
   const [practiceLoading, setPracticeLoading] = useState(false);
   const [practiceQuestions, setPracticeQuestions] = useState([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
@@ -144,6 +146,10 @@ const CourseDetail = () => {
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
   const [leaderboardRows, setLeaderboardRows] = useState([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  const [classroomDialogOpen, setClassroomDialogOpen] = useState(false);
+  const [classroomTab, setClassroomTab] = useState(0);
+  const [instructorStudents, setInstructorStudents] = useState([]);
+  const [instructorStudentsLoading, setInstructorStudentsLoading] = useState(false);
 
   const refreshGamification = useCallback(async () => {
     if (user?.role !== 'student' || !enrolled || !id) return;
@@ -223,6 +229,28 @@ const CourseDetail = () => {
       setLeaderboardRows([]);
     } finally {
       setLeaderboardLoading(false);
+    }
+  };
+
+  const openClassroomOverview = async () => {
+    setClassroomDialogOpen(true);
+    setClassroomTab(0);
+    setLeaderboardLoading(true);
+    setInstructorStudentsLoading(true);
+    try {
+      const [lb, st] = await Promise.all([
+        api.get(`/gamification/course/${id}/leaderboard/`, { params: { limit: 40 } }),
+        api.get(`/gamification/instructor/course/${id}/students/`),
+      ]);
+      setLeaderboardRows(lb.data?.entries || []);
+      setInstructorStudents(st.data?.students || []);
+    } catch (e) {
+      toast.error(e?.response?.data?.error || 'Could not load classroom overview');
+      setLeaderboardRows([]);
+      setInstructorStudents([]);
+    } finally {
+      setLeaderboardLoading(false);
+      setInstructorStudentsLoading(false);
     }
   };
 
@@ -374,6 +402,10 @@ const CourseDetail = () => {
           subsection_ids: practiceSelectedLectureIds,
           num_questions: practiceNumQuestions,
           bank_multiplier: 3,
+          warmup_questions: Math.min(
+            Math.max(0, practiceWarmupQuestions),
+            practiceNumQuestions
+          ),
         },
         { timeout: 360000 }
       );
@@ -390,8 +422,12 @@ const CourseDetail = () => {
       setPracticeStepDisplay(1);
       pushEngagement({
         headline: 'Adaptive practice online',
-        body: `Question bank: ${res.data.bank_size ?? '—'} items · this session: ${res.data.total_questions} questions.`,
-        sub: 'Hybrid policy is selecting your path. Good luck!',
+        body: `Question bank: ${res.data.bank_size ?? '—'} items · session: ${res.data.total_questions} questions${
+          res.data.warmup_questions
+            ? ` · first ${res.data.warmup_questions} from a spread sample, then policy-driven picks`
+            : ''
+        }.`,
+        sub: 'Later items use your answers + θ / topic model. Good luck!',
         flavor: 'practice',
       });
     } catch (e) {
@@ -1006,6 +1042,11 @@ const CourseDetail = () => {
         {enrolled && (
           <Button variant="contained" onClick={() => navigate('/my-courses')}>
             Go to My Courses
+          </Button>
+        )}
+        {isInstructorOrAdmin && (
+          <Button variant="outlined" startIcon={<People />} sx={{ ml: enrolled ? 1 : 0 }} onClick={openClassroomOverview}>
+            Student progress & leaderboard
           </Button>
         )}
       </Box>
@@ -1916,9 +1957,29 @@ const CourseDetail = () => {
                     label="Questions"
                     type="number"
                     size="small"
-                    sx={{ width: 140 }}
+                    sx={{ width: 120 }}
                     value={practiceNumQuestions}
-                    onChange={(e) => setPracticeNumQuestions(Math.max(1, Math.min(15, Number(e.target.value) || 5)))}
+                    onChange={(e) => {
+                      const v = Math.max(1, Math.min(30, Number(e.target.value) || 5));
+                      setPracticeNumQuestions(v);
+                      setPracticeWarmupQuestions((w) => Math.min(Math.max(0, w), v, 20));
+                    }}
+                  />
+                  <TextField
+                    label="Warmup first"
+                    type="number"
+                    size="small"
+                    sx={{ width: 130 }}
+                    helperText="Random spread, then adaptive"
+                    value={practiceWarmupQuestions}
+                    onChange={(e) =>
+                      setPracticeWarmupQuestions(
+                        Math.min(
+                          practiceNumQuestions,
+                          Math.max(0, Math.min(20, Number(e.target.value) || 0))
+                        )
+                      )
+                    }
                   />
 
                   <Button variant="contained" startIcon={<AutoAwesome />} disabled={practiceLoading} onClick={handleGeneratePractice}>
@@ -1938,6 +1999,9 @@ const CourseDetail = () => {
                       )}
                       {practiceQuestions[practiceIndex]?.taxonomy && (
                         <Chip size="small" variant="outlined" label={`Taxonomy: ${practiceQuestions[practiceIndex].taxonomy}`} />
+                      )}
+                      {practiceQuestions[practiceIndex]?.lecture_title && (
+                        <Chip size="small" variant="outlined" color="secondary" label={`Lecture: ${practiceQuestions[practiceIndex].lecture_title}`} />
                       )}
                     </Box>
                     <Typography variant="subtitle1" sx={{ mb: 1 }}>
@@ -2785,6 +2849,87 @@ const CourseDetail = () => {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setLeaderboardOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={classroomDialogOpen} onClose={() => setClassroomDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Student progress & leaderboard</DialogTitle>
+        <DialogContent>
+          <Tabs value={classroomTab} onChange={(e, v) => setClassroomTab(v)} sx={{ mb: 2 }}>
+            <Tab label="Leaderboard (XP)" />
+            <Tab label="All students" />
+          </Tabs>
+          {classroomTab === 0 && (
+            <>
+              {leaderboardLoading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                  <CircularProgress size={28} />
+                </Box>
+              ) : (
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>#</TableCell>
+                      <TableCell>Student</TableCell>
+                      <TableCell align="right">XP</TableCell>
+                      <TableCell align="right">Level</TableCell>
+                      <TableCell align="right">Streak</TableCell>
+                      <TableCell align="right">Badges</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {leaderboardRows.map((row) => (
+                      <TableRow key={`${row.rank}-${row.username}`}>
+                        <TableCell>{row.rank}</TableCell>
+                        <TableCell>{row.display_name || row.username}</TableCell>
+                        <TableCell align="right">{row.total_xp}</TableCell>
+                        <TableCell align="right">{row.level}</TableCell>
+                        <TableCell align="right">{row.current_streak_days}d</TableCell>
+                        <TableCell align="right">{row.badge_count}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </>
+          )}
+          {classroomTab === 1 && (
+            <>
+              {instructorStudentsLoading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                  <CircularProgress size={28} />
+                </Box>
+              ) : (
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Student</TableCell>
+                      <TableCell align="right">Course progress</TableCell>
+                      <TableCell align="right">XP</TableCell>
+                      <TableCell align="right">Level</TableCell>
+                      <TableCell align="right">Streak</TableCell>
+                      <TableCell align="right">Badges</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {instructorStudents.map((row) => (
+                      <TableRow key={row.student_id}>
+                        <TableCell>{row.display_name || row.username}</TableCell>
+                        <TableCell align="right">{row.progress_percentage}%</TableCell>
+                        <TableCell align="right">{row.total_xp}</TableCell>
+                        <TableCell align="right">{row.level}</TableCell>
+                        <TableCell align="right">{row.current_streak_days}d</TableCell>
+                        <TableCell align="right">{row.badge_count}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setClassroomDialogOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
     </Container>

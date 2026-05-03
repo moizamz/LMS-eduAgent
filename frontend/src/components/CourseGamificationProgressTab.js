@@ -11,6 +11,7 @@ import {
 } from '@mui/material';
 import { format, parseISO } from 'date-fns';
 import api from '../services/api';
+import StudentAdaptiveAnalytics from './StudentAdaptiveAnalytics';
 
 function BarChart({ counts }) {
   const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
@@ -226,6 +227,9 @@ export default function CourseGamificationProgressTab({ courseId }) {
             </Box>
           </CardContent>
         </Card>
+      </Grid>
+      <Grid item xs={12}>
+        <StudentAdaptiveAnalytics courseId={courseId} />
       </Grid>
     </Grid>
   );

@@ -27,8 +27,8 @@ const Dashboard = () => {
     highestScore: 0,
     lowestScore: 0,
     totalTimeSpent: 0,
-    weeklyStreak: 1,
-    longestStreak: 15,
+    weeklyStreak: 0,
+    longestStreak: 0,
     lastQuizScore: null,
   });
   const [enrollments, setEnrollments] = useState([]);
@@ -110,6 +110,13 @@ const Dashboard = () => {
     try {
       const res = await api.get('/gamification/student/dashboard/');
       setRewardDash(res.data);
+      const d = res.data || {};
+      setStats((prev) => ({
+        ...prev,
+        totalTimeSpent: d.total_practice_quiz_hours ?? 0,
+        weeklyStreak: d.weekly_active_streak_days ?? 0,
+        longestStreak: d.longest_streak_days ?? 0,
+      }));
     } catch (error) {
       console.error('Error fetching gamification dashboard:', error);
       setRewardDash(null);
@@ -447,19 +454,22 @@ const Dashboard = () => {
                       Total Time Spent
                     </Typography>
                     <Typography variant="h4" sx={{ color: '#8b5cf6', fontWeight: 600, mb: 2 }}>
-                      {stats.totalTimeSpent} Hours
+                      {stats.totalTimeSpent > 0 && stats.totalTimeSpent < 1
+                        ? `${Math.round(stats.totalTimeSpent * 60)} min`
+                        : `${Number(stats.totalTimeSpent).toFixed(1)} h`}
                     </Typography>
                     <Typography variant="caption" sx={{ color: '#757575', mb: 1, display: 'block' }}>
-                      This Week
+                      Quiz + adaptive practice (completed sessions)
                     </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5 }}>
-                      {[1, 2, 3, 4, 5].map((day) => (
+                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                      {(rewardDash?.week_activity || []).map((day) => (
                         <Box
-                          key={day}
+                          key={day.date}
+                          title={day.date}
                           sx={{
-                            width: 24,
-                            height: 24,
-                            backgroundColor: day <= 3 ? '#8b5cf6' : '#e0e0e0',
+                            width: 22,
+                            height: 22,
+                            backgroundColor: day.active ? '#8b5cf6' : '#e0e0e0',
                             borderRadius: 1,
                           }}
                         />
@@ -469,36 +479,40 @@ const Dashboard = () => {
                 </Card>
               </Box>
 
-              {/* Weekly Streak Card */}
+              {/* Activity streak card */}
               <Box sx={{ flex: 1, minWidth: 220 }}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
-                      Weekly Streak
+                      Learning streak
                     </Typography>
                     <Typography variant="h4" sx={{ color: '#8b5cf6', fontWeight: 600, mb: 1 }}>
                       {stats.weeklyStreak} Days
                     </Typography>
                     <Typography variant="caption" sx={{ color: '#757575', mb: 2, display: 'block' }}>
-                      Longest Streak {stats.longestStreak} days
+                      Longest streak (any course): {stats.longestStreak}d · best current:{' '}
+                      {rewardDash?.current_streak_best_course ?? 0}d
                     </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5 }}>
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((day) => (
+                    <Typography variant="caption" sx={{ color: '#757575', mb: 1, display: 'block' }}>
+                      Last 7 days activity
+                    </Typography>
+                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                      {(rewardDash?.week_activity || []).map((day) => (
                         <Box
-                          key={day}
+                          key={`w-${day.date}`}
                           sx={{
-                            width: 24,
-                            height: 24,
+                            width: 26,
+                            height: 26,
                             borderRadius: '50%',
-                            backgroundColor: day === 1 ? '#8b5cf6' : '#e0e0e0',
+                            backgroundColor: day.active ? '#8b5cf6' : '#e0e0e0',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            color: day === 1 ? '#ffffff' : '#757575',
-                            fontSize: '0.75rem',
+                            color: day.active ? '#ffffff' : '#bdbdbd',
+                            fontSize: '0.7rem',
                           }}
                         >
-                          ✓
+                          {day.active ? '✓' : ''}
                         </Box>
                       ))}
                     </Box>

@@ -9,8 +9,10 @@ import {
   LinearProgress,
   Grid,
   Chip,
+  Divider,
+  Paper,
 } from '@mui/material';
-import { TrendingUp, EmojiEvents } from '@mui/icons-material';
+import { TrendingUp, EmojiEvents, Psychology } from '@mui/icons-material';
 import { format, parseISO } from 'date-fns';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../services/api';
@@ -52,10 +54,53 @@ function XpByDayChart({ points }) {
   );
 }
 
+function ThetaByCourseChart({ courses }) {
+  const rows = (courses || []).filter((c) => c && c.course_title);
+  if (!rows.length) {
+    return (
+      <Typography variant="body2" color="text.secondary">
+        Enroll in a course and run adaptive practice to populate ability estimates.
+      </Typography>
+    );
+  }
+  const maxAbs = Math.max(0.5, ...rows.map((c) => Math.abs(Number(c.theta) || 0)));
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mt: 1 }}>
+      {rows.map((c) => {
+        const t = Number(c.theta) || 0;
+        const pct = 50 + (t / maxAbs) * 45;
+        return (
+          <Box key={c.course_id}>
+            <Typography variant="caption" sx={{ fontWeight: 600 }} noWrap title={c.course_title}>
+              {c.course_title}
+            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ minWidth: 36 }}>
+                θ {t.toFixed(2)}
+              </Typography>
+              <LinearProgress
+                variant="determinate"
+                value={Math.min(100, Math.max(0, pct))}
+                sx={{
+                  flex: 1,
+                  height: 8,
+                  borderRadius: 4,
+                  '& .MuiLinearProgress-bar': { bgcolor: t >= 0 ? '#7c3aed' : '#f59e0b' },
+                }}
+              />
+            </Box>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
 const MyProgress = () => {
   const { user } = useAuth();
   const [progress, setProgress] = useState([]);
   const [rewardDash, setRewardDash] = useState(null);
+  const [learningSummary, setLearningSummary] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -65,15 +110,23 @@ const MyProgress = () => {
 
   const fetchProgress = async () => {
     try {
-      const [enRes, gRes] = await Promise.all([
+      const [enRes, gRes, learnRes] = await Promise.all([
         api.get('/courses/my-enrollments/'),
         user?.role === 'student'
           ? api.get('/gamification/student/dashboard/').catch(() => null)
+          : Promise.resolve(null),
+        user?.role === 'student'
+          ? api.get('/quizzes/my-learning-summary/').catch(() => null)
           : Promise.resolve(null),
       ]);
       const enrollments = Array.isArray(enRes.data) ? enRes.data : [];
       setProgress(enrollments);
       if (gRes?.data) setRewardDash(gRes.data);
+      if (learnRes?.data) {
+        setLearningSummary(learnRes.data);
+      } else if (user?.role === 'student') {
+        setLearningSummary({ courses: [] });
+      }
     } catch (error) {
       console.error('Error fetching progress:', error);
     } finally {
@@ -98,6 +151,158 @@ const MyProgress = () => {
             My Progress
           </Typography>
         </Box>
+
+        {user?.role === 'student' && learningSummary && (
+          <Box sx={{ mb: 4 }}>
+            <Paper
+              elevation={0}
+              sx={{
+                p: 2,
+                mb: 2,
+                textAlign: 'center',
+                background: 'linear-gradient(90deg, #ede9fe 0%, #faf5ff 45%, #fff 100%)',
+                border: '1px solid #ddd6fe',
+              }}
+            >
+              <Typography variant="overline" sx={{ letterSpacing: 3, color: '#4c1d95', fontWeight: 700 }}>
+                MY LEARNING
+              </Typography>
+              <Typography variant="caption" display="block" color="text.secondary">
+                Adaptive ability, topics, and quiz trajectory across your courses
+              </Typography>
+            </Paper>
+            <Grid container spacing={3}>
+              <Grid item xs={12} md={5}>
+                <Card sx={{ boxShadow: '0 2px 12px rgba(124,58,237,0.12)', height: '100%' }}>
+                  <CardContent>
+                    <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Psychology color="primary" />
+                      Ability (θ) by course
+                    </Typography>
+                    <ThetaByCourseChart courses={learningSummary.courses} />
+                  </CardContent>
+                </Card>
+              </Grid>
+              <Grid item xs={12} md={7}>
+                <Card sx={{ boxShadow: '0 2px 12px rgba(124,58,237,0.12)' }}>
+                  <CardContent>
+                    <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 2 }}>
+                      Course detail
+                    </Typography>
+                    {!learningSummary.courses?.length ? (
+                      <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+                        No enrollments yet, or adaptive practice has not updated your profile. Open a course, run adaptive
+                        practice, and your θ / topic strengths will appear here.
+                      </Typography>
+                    ) : (
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 420, overflow: 'auto' }}>
+                      {learningSummary.courses.map((c) => (
+                        <Box
+                          key={c.course_id}
+                          sx={{
+                            p: 2,
+                            borderRadius: 2,
+                            border: '1px solid #ede9fe',
+                            background: 'linear-gradient(180deg, #fafafa 0%, #fff 100%)',
+                          }}
+                        >
+                          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                            {c.course_title}
+                          </Typography>
+                          <Typography variant="body2" sx={{ mt: 0.5 }}>
+                            Current ability (θ):{' '}
+                            <strong>
+                              {c.theta?.toFixed?.(2) ?? c.theta} {c.theta_trend || ''}
+                            </strong>
+                            {c.theta_session_delta_hint != null && (
+                              <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                                last session Δθ {c.theta_session_delta_hint > 0 ? '+' : ''}
+                                {c.theta_session_delta_hint}
+                              </Typography>
+                            )}
+                          </Typography>
+                          <Typography variant="body2" sx={{ mt: 0.75 }}>
+                            Recommended difficulty: <strong>{c.recommended_difficulty}</strong>
+                          </Typography>
+                          <Grid container spacing={1} sx={{ mt: 1 }}>
+                            <Grid item xs={12} sm={6}>
+                              <Typography variant="caption" color="success.main" sx={{ fontWeight: 600 }}>
+                                Strong topics
+                              </Typography>
+                              <Box sx={{ mt: 0.5 }}>
+                                {(c.strong_topics || []).length ? (
+                                  (c.strong_topics || []).map((t) => (
+                                    <Chip key={t} size="small" label={`✔ ${t}`} sx={{ mr: 0.5, mb: 0.5, bgcolor: '#ecfdf5' }} />
+                                  ))
+                                ) : (
+                                  <Typography variant="caption" color="text.secondary">
+                                    —
+                                  </Typography>
+                                )}
+                              </Box>
+                            </Grid>
+                            <Grid item xs={12} sm={6}>
+                              <Typography variant="caption" color="warning.main" sx={{ fontWeight: 600 }}>
+                                Weak topics
+                              </Typography>
+                              <Box sx={{ mt: 0.5 }}>
+                                {(c.weak_topics || []).length ? (
+                                  (c.weak_topics || []).map((t) => (
+                                    <Chip key={t} size="small" label={`⚠ ${t}`} sx={{ mr: 0.5, mb: 0.5, bgcolor: '#fffbeb' }} />
+                                  ))
+                                ) : (
+                                  <Typography variant="caption" color="text.secondary">
+                                    —
+                                  </Typography>
+                                )}
+                              </Box>
+                            </Grid>
+                          </Grid>
+                          <Divider sx={{ my: 1.5 }} />
+                          <Typography variant="caption" color="text.secondary">
+                            Progress (quiz scores, chronological)
+                          </Typography>
+                          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mt: 0.5 }}>
+                            <Box>
+                              <Typography variant="caption">Pre (earliest)</Typography>
+                              <Typography variant="h6" sx={{ color: '#6366f1' }}>
+                                {c.pre_test_pct != null ? `${c.pre_test_pct}%` : '—'}
+                              </Typography>
+                            </Box>
+                            <Box>
+                              <Typography variant="caption">Post (latest)</Typography>
+                              <Typography variant="h6" sx={{ color: '#7c3aed' }}>
+                                {c.post_test_pct != null ? `${c.post_test_pct}%` : '—'}
+                              </Typography>
+                            </Box>
+                            <Box sx={{ alignSelf: 'flex-end' }}>
+                              <Typography variant="caption" color="text.secondary">
+                                attempts: {c.quiz_attempts_count ?? 0}
+                              </Typography>
+                            </Box>
+                          </Box>
+                          {c.pre_test_pct != null && c.post_test_pct != null && (
+                            <LinearProgress
+                              variant="determinate"
+                              value={Math.min(100, Math.max(0, c.post_test_pct))}
+                              sx={{
+                                mt: 1.5,
+                                height: 8,
+                                borderRadius: 4,
+                                '& .MuiLinearProgress-bar': { bgcolor: '#8b5cf6' },
+                              }}
+                            />
+                          )}
+                        </Box>
+                      ))}
+                    </Box>
+                    )}
+                  </CardContent>
+                </Card>
+              </Grid>
+            </Grid>
+          </Box>
+        )}
 
         {user?.role === 'student' && rewardDash && (
           <Grid container spacing={3} sx={{ mb: 4 }}>

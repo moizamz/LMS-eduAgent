@@ -1,17 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Typography, keyframes } from '@mui/material';
+import { Box, Typography, CircularProgress } from '@mui/material';
 import { pickEngagementMessage } from '../constants/loadingEngagement';
-
-const pulse = keyframes`
-  0% { transform: scale(0.92); opacity: 0.55; }
-  50% { transform: scale(1.06); opacity: 1; }
-  100% { transform: scale(0.92); opacity: 0.55; }
-`;
-
-const spin = keyframes`
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-`;
 
 /**
  * Full-bleed overlay with playful copy rotation while `active` is true.
@@ -48,26 +37,7 @@ export default function EngagementLoadingOverlay({ active, messages, subtitle })
         border: '1px solid rgba(139, 92, 246, 0.25)',
       }}
     >
-      <Box
-        sx={{
-          width: 56,
-          height: 56,
-          borderRadius: '50%',
-          border: '3px solid transparent',
-          borderTopColor: '#8b5cf6',
-          borderRightColor: '#c4b5fd',
-          animation: `${spin} 0.9s linear infinite`,
-        }}
-      />
-      <Box
-        sx={{
-          width: 12,
-          height: 12,
-          borderRadius: '50%',
-          bgcolor: '#a78bfa',
-          animation: `${pulse} 1.4s ease-in-out infinite`,
-        }}
-      />
+      <CircularProgress size={56} thickness={4} sx={{ color: '#8b5cf6' }} />
       <Typography
         variant="subtitle1"
         align="center"

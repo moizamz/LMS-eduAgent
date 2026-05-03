@@ -8,6 +8,8 @@ previous item, and a short-term accuracy bin so transitions react to pace and ma
 
 During a session, questions are drawn only from a pre-generated bank; the policy
 selects which arm to pull next, then a random unused question from that stratum.
+Bank items may carry ``lecture_title`` (from chunk manifest); θ / topic exploration
+uses ``lecture_title::taxonomy`` so weak lectures get boosted within the same arm.
 """
 
 from __future__ import annotations
@@ -68,6 +70,8 @@ def normalize_question(q: Dict[str, Any], bid: int) -> Dict[str, Any]:
     out = dict(q)
     out["difficulty"] = _norm_dif(str(out.get("difficulty") or "medium"))
     out["taxonomy"] = _norm_diff(str(out.get("taxonomy") or "understand"))
+    lt = str(out.get("lecture_title") or out.get("lecture") or "").strip()
+    out["lecture_title"] = lt[:240] if lt else ""
     out["bank_id"] = bid
     return out
 

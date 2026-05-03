@@ -1,4 +1,5 @@
 import logging
+import math
 
 from rest_framework import generics, status, permissions, serializers
 from rest_framework.decorators import api_view, permission_classes, parser_classes
@@ -22,6 +23,8 @@ from .serializers import (
 )
 from courses.models import Course, Enrollment, Section, Subsection
 from django.views.decorators.http import require_GET
+
+from quizzes.adaptive_theta import format_topic_hist_label, split_topic_key
 
 print("===== VIEWS.PY LOADED =====")
 
@@ -48,12 +51,13 @@ def _learner_context_for_bank_prompt(astate: dict, prior_lines: list) -> str:
     lines = []
     th = astate.get('topic_hist') or {}
     if th:
-        lines.append('Per-topic adaptive accuracy (Bloom taxonomy):')
-        for tax, cell in sorted(th.items(), key=lambda kv: -int((kv[1] or {}).get('n', 0)))[:10]:
+        lines.append('Per-topic adaptive accuracy (lecture + Bloom taxonomy):')
+        for topic_key, cell in sorted(th.items(), key=lambda kv: -int((kv[1] or {}).get('n', 0)))[:12]:
             n = int((cell or {}).get('n', 0))
             c = int((cell or {}).get('c', 0))
             if n > 0:
-                lines.append(f"  - {tax}: {c}/{n} correct ({100.0 * c / n:.0f}%)")
+                label = format_topic_hist_label(str(topic_key))
+                lines.append(f"  - {label}: {c}/{n} correct ({100.0 * c / n:.0f}%)")
     try:
         lines.append(f"Estimated ability theta (IRT-lite): {float(astate.get('theta', 0.0)):.2f}")
     except (TypeError, ValueError):
@@ -380,13 +384,15 @@ def generate_questions(request):
         return Response({'error': 'No lecture content could be extracted'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        questions = generate_questions_with_fallback(lecture_contents, num_questions=int(num_questions))
-        logger.info("[Generate] LLM returned %d questions", len(questions or []))
+        questions, quality_report = generate_questions_with_fallback(
+            lecture_contents, num_questions=int(num_questions), return_quality_report=True
+        )
+        logger.info("[Generate] After validation+judge: %d questions", len(questions or []))
     except Exception as e:
         logger.exception("[Generate] LLM error: %s", e)
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    return Response({'questions': questions or []})
+    return Response({'questions': questions or [], 'quality_report': quality_report})
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
@@ -644,15 +650,31 @@ def practice_session_list_create(request):
         return Response({'error': 'No lecture content could be extracted'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        questions = generate_questions_with_fallback(lecture_contents, num_questions=int(num_questions))
+        questions, quality_report = generate_questions_with_fallback(
+            lecture_contents, num_questions=int(num_questions), return_quality_report=True
+        )
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    if not questions:
+        return Response(
+            {
+                'error': 'No questions passed deterministic validation and LLM judge for this material.',
+                'quality_report': quality_report,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     session = PracticeSession.objects.create(
         student=request.user,
         course=course,
         num_questions=len(questions),
-        data={'questions': questions, 'answers': []},
+        data={
+            'mode': 'practice',
+            'questions': questions,
+            'answers': [],
+            'quality_report': quality_report,
+        },
     )
 
     return Response({
@@ -931,6 +953,7 @@ def adaptive_practice_start(request):
                     'faithfulness_pct': quality_report.get('faithfulness_pct_display'),
                     'coverage_blueprint_pct': quality_report.get('coverage_blueprint_pct'),
                     'latency_ms': quality_report.get('latency_ms'),
+                    'llm_judge': quality_report.get('llm_judge'),
                 },
             }
         )
@@ -1194,15 +1217,19 @@ def adaptive_learning_insights(request, course_id):
         return xs[k]
 
     weak_topics = []
-    for tax, cell in topic_hist.items():
+    for topic_key, cell in topic_hist.items():
         n = int(cell.get('n', 0))
         c = int(cell.get('c', 0))
         if n < 2:
             continue
         p = c / max(1, n)
+        lec, bloom = split_topic_key(str(topic_key))
         weak_topics.append(
             {
-                'taxonomy': tax,
+                'topic_key': str(topic_key),
+                'lecture_title': lec or None,
+                'taxonomy': bloom,
+                'display_label': format_topic_hist_label(str(topic_key)),
                 'attempts': n,
                 'accuracy': round(p * 100, 1),
                 'priority': round(max(0.0, 0.65 - p), 3),
@@ -1250,8 +1277,8 @@ def adaptive_learning_insights(request, course_id):
     for w in weak_topics[:5]:
         recommendations.append(
             {
-                'title': f"Strengthen: {w['taxonomy'].replace('_', ' ').title()}",
-                'detail': f"Accuracy {w['accuracy']}% over {w['attempts']} adaptive items — schedule focused review and short drills on this Bloom level.",
+                'title': f"Strengthen: {w.get('display_label') or w['taxonomy'].replace('_', ' ').title()}",
+                'detail': f"Accuracy {w['accuracy']}% over {w['attempts']} adaptive items — schedule focused review (lecture + Bloom level as needed).",
             }
         )
 
@@ -1285,4 +1312,262 @@ def adaptive_learning_insights(request, course_id):
             'policy_engine': 'hybrid_tabular_q_ucb_linear_td_theta_topic_balance',
         }
     )
+
+
+def _pctile_ms(arr, p):
+    if not arr:
+        return None
+    xs = sorted(arr)
+    k = max(0, min(len(xs) - 1, int(round((p / 100.0) * (len(xs) - 1)))))
+    return xs[k]
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def eduagent_analytics_admin(request):
+    """
+    Aggregate LLM / validation / latency metrics from adaptive practice sessions (admin).
+    """
+    if not request.user.is_admin:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    sessions = list(PracticeSession.objects.order_by('-created_at')[:1200])
+    latencies = []
+    faiths = []
+    pass_rates = []
+    kept_total = 0
+    input_total = 0
+    diff_counts = {'easy': 0, 'medium': 0, 'hard': 0}
+    disc_samples = []
+    adaptive_sessions = 0
+    generative_sessions = 0
+    judge_latencies: list = []
+    judge_pass_rates: list = []
+    judge_overall: list = []
+    judge_clarity: list = []
+    judge_grounding: list = []
+    judge_distractor: list = []
+    judge_sessions = 0
+    judge_degraded_sessions = 0
+    judge_rejected_items = 0
+
+    for sess in sessions:
+        d = sess.data or {}
+        qr = d.get('quality_report')
+        if not isinstance(qr, dict):
+            continue
+        generative_sessions += 1
+        mode = d.get('mode')
+        if mode == 'adaptive':
+            adaptive_sessions += 1
+        summ = qr.get('validation_summary') or {}
+        try:
+            ki = int(summ.get('input_count') or 0)
+            kk = int(summ.get('kept_count') or 0)
+        except (TypeError, ValueError):
+            ki, kk = 0, 0
+        if ki > 0:
+            pass_rates.append(kk / float(ki))
+            input_total += ki
+            kept_total += kk
+        if qr.get('latency_ms') is not None:
+            try:
+                latencies.append(int(qr['latency_ms']))
+            except (TypeError, ValueError):
+                pass
+        if qr.get('faithfulness_mean') is not None:
+            try:
+                faiths.append(float(qr['faithfulness_mean']))
+            except (TypeError, ValueError):
+                pass
+        bank = d.get('bank') or []
+        q_iter = bank if isinstance(bank, list) and bank else (d.get('questions') or [])
+        if isinstance(q_iter, list):
+            for q in q_iter[:80]:
+                if not isinstance(q, dict):
+                    continue
+                diff = str(q.get('difficulty', 'medium')).lower()
+                if diff in diff_counts:
+                    diff_counts[diff] += 1
+                elif diff in ('moderate', 'med', 'mid'):
+                    diff_counts['medium'] += 1
+
+        lj = qr.get('llm_judge')
+        if isinstance(lj, dict) and lj.get('enabled'):
+            judge_sessions += 1
+            if lj.get('degraded'):
+                judge_degraded_sessions += 1
+            try:
+                lt = int(lj.get('latency_ms_total') or 0)
+                if lt > 0:
+                    judge_latencies.append(lt)
+            except (TypeError, ValueError):
+                pass
+            try:
+                pr = float(lj.get('pass_rate_pct'))
+                if math.isfinite(pr):
+                    judge_pass_rates.append(pr)
+            except (TypeError, ValueError):
+                pass
+            for arr, key in (
+                (judge_overall, 'mean_overall_score'),
+                (judge_clarity, 'mean_clarity'),
+                (judge_grounding, 'mean_grounding'),
+                (judge_distractor, 'mean_distractor_quality'),
+            ):
+                try:
+                    v = lj.get(key)
+                    if v is not None and math.isfinite(float(v)):
+                        arr.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+            try:
+                judge_rejected_items += int(lj.get('rejected_count') or 0)
+            except (TypeError, ValueError):
+                pass
+
+    for pol in StudentAdaptivePolicyState.objects.all()[:4000]:
+        acc = (pol.ability_state or {}).get('stratum_accuracy') or {}
+        if not isinstance(acc, dict):
+            continue
+        for _, cell in acc.items():
+            if not isinstance(cell, dict):
+                continue
+            n = int(cell.get('n', 0))
+            c = int(cell.get('c', 0))
+            if n >= 8:
+                p_val = c / float(n)
+                disc_samples.append(min(1.0, max(-1.0, 2.0 * (p_val - 0.5))))
+
+    dtot = sum(diff_counts.values()) or 1
+    diff_pct = {k: round(100.0 * v / dtot, 1) for k, v in diff_counts.items()}
+
+    return Response(
+        {
+            'headline': 'EduAgent analytics dashboard (admin)',
+            'adaptive_sessions_scanned': adaptive_sessions,
+            'generative_sessions_with_quality_report': generative_sessions,
+            'questions_generated_kept': kept_total,
+            'questions_generated_raw': input_total,
+            'validation_pass_rate_pct': round(100.0 * sum(pass_rates) / len(pass_rates), 1) if pass_rates else None,
+            'faithfulness_score_pct': round(100.0 * sum(faiths) / len(faiths), 1) if faiths else None,
+            'difficulty_distribution_pct': {
+                'easy': diff_pct.get('easy', 0),
+                'moderate': diff_pct.get('medium', 0),
+                'hard': diff_pct.get('hard', 0),
+            },
+            'average_discrimination_proxy': round(sum(disc_samples) / len(disc_samples), 3) if disc_samples else None,
+            'discrimination_samples': len(disc_samples),
+            'average_generation_time_sec': round((sum(latencies) / len(latencies)) / 1000.0, 2) if latencies else None,
+            'p95_latency_sec': round((_pctile_ms(latencies, 95) or 0) / 1000.0, 2) if latencies else None,
+            'latency_samples': len(latencies),
+            'curated_question_bank_count': Question.objects.count(),
+            'llm_judge_sessions': judge_sessions,
+            'llm_judge_degraded_sessions': judge_degraded_sessions,
+            'llm_judge_pass_rate_mean_pct': round(sum(judge_pass_rates) / len(judge_pass_rates), 1)
+            if judge_pass_rates
+            else None,
+            'llm_judge_avg_overall_score': round(sum(judge_overall) / len(judge_overall), 2) if judge_overall else None,
+            'llm_judge_avg_clarity': round(sum(judge_clarity) / len(judge_clarity), 2) if judge_clarity else None,
+            'llm_judge_avg_grounding': round(sum(judge_grounding) / len(judge_grounding), 2) if judge_grounding else None,
+            'llm_judge_avg_distractor_quality': round(sum(judge_distractor) / len(judge_distractor), 2)
+            if judge_distractor
+            else None,
+            'llm_judge_latency_avg_sec': round((sum(judge_latencies) / len(judge_latencies)) / 1000.0, 2)
+            if judge_latencies
+            else None,
+            'llm_judge_latency_p95_sec': round((_pctile_ms(judge_latencies, 95) or 0) / 1000.0, 2)
+            if judge_latencies
+            else None,
+            'llm_judge_rejected_items_total': judge_rejected_items,
+        }
+    )
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def student_my_learning_summary(request):
+    """
+    Cross-course adaptive snapshot for the student dashboard (θ, topics, quiz pre/post proxy).
+    """
+    if not request.user.is_student:
+        return Response({'error': 'Only students'}, status=status.HTTP_403_FORBIDDEN)
+
+    from quizzes.adaptive_theta import merge_ability_state
+
+    enrollments = Enrollment.objects.filter(student=request.user).select_related('course')
+    courses_out = []
+
+    for en in enrollments:
+        course = en.course
+        pol = StudentAdaptivePolicyState.objects.filter(student=request.user, course=course).first()
+        astate = merge_ability_state(getattr(pol, 'ability_state', None) if pol else None)
+        theta = float(astate.get('theta', 0.0))
+        topic_hist = astate.get('topic_hist') or {}
+
+        strong = []
+        weak = []
+        for topic_key, cell in topic_hist.items():
+            if not isinstance(cell, dict):
+                continue
+            n = int(cell.get('n', 0))
+            c = int(cell.get('c', 0))
+            if n < 2:
+                continue
+            p = c / max(1, n)
+            label = format_topic_hist_label(str(topic_key))
+            if p >= 0.72:
+                strong.append(label)
+            elif p < 0.58:
+                weak.append(label)
+
+        if theta < -0.25:
+            rec = 'Easy → Moderate'
+        elif theta > 0.55:
+            rec = 'Moderate → Hard'
+        else:
+            rec = 'Moderate'
+
+        attempts = list(
+            QuizAttempt.objects.filter(student=request.user, quiz__course=course, is_completed=True)
+            .exclude(score__isnull=True)
+            .select_related('quiz')
+            .order_by('submitted_at')
+        )
+        pre_pct = round(float(attempts[0].score), 1) if attempts else None
+        post_pct = round(float(attempts[-1].score), 1) if attempts else None
+
+        theta_delta = None
+        last_sess = (
+            PracticeSession.objects.filter(student=request.user, course=course)
+            .order_by('-created_at')
+            .first()
+        )
+        if last_sess and isinstance(last_sess.data, dict):
+            tr = last_sess.data.get('theta_trace') or []
+            if len(tr) >= 2:
+                try:
+                    theta_delta = round(float(tr[-1]) - float(tr[0]), 3)
+                except (TypeError, ValueError):
+                    theta_delta = None
+
+        trend = '↑' if (theta_delta or 0) > 0.02 else ('↓' if (theta_delta or 0) < -0.02 else '→')
+
+        courses_out.append(
+            {
+                'course_id': course.id,
+                'course_title': course.title,
+                'theta': round(theta, 2),
+                'theta_trend': trend,
+                'theta_session_delta_hint': theta_delta,
+                'strong_topics': strong[:8],
+                'weak_topics': weak[:8],
+                'recommended_difficulty': rec,
+                'pre_test_pct': pre_pct,
+                'post_test_pct': post_pct if attempts else None,
+                'quiz_attempts_count': len(attempts),
+            }
+        )
+
+    return Response({'headline': 'My learning', 'courses': courses_out})
 

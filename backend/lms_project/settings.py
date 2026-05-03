@@ -214,3 +214,9 @@ GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-2.0-flash')
 # Local Ollama chat/generate model (e.g. llama3.2:latest). Empty = auto-pick first llama3* model.
 OLLAMA_MODEL = config('OLLAMA_MODEL', default='')
 
+# MCQ LLM-as-judge (second pass after deterministic validation in mcq_validation).
+MCQ_LLM_JUDGE_ENABLED = config('MCQ_LLM_JUDGE_ENABLED', default=True, cast=bool)
+MCQ_LLM_JUDGE_MIN_SCORE = config('MCQ_LLM_JUDGE_MIN_SCORE', default=7, cast=int)  # 1–10 inclusive
+MCQ_LLM_JUDGE_BATCH_SIZE = config('MCQ_LLM_JUDGE_BATCH_SIZE', default=4, cast=int)
+MCQ_LLM_JUDGE_STRICT = config('MCQ_LLM_JUDGE_STRICT', default=False, cast=bool)
+

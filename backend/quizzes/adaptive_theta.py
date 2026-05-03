@@ -48,8 +48,29 @@ def merge_ability_state(raw: Optional[dict]) -> Dict[str, Any]:
     return base
 
 
+def split_topic_key(key: str) -> Tuple[str, str]:
+    """Split ``topic_hist`` keys into (lecture_title, bloom_taxonomy)."""
+    k = str(key or "")
+    if "::" in k:
+        lec, tax = k.split("::", 1)
+        return (lec.strip(), (tax.strip() or "understand"))
+    return ("", (k.strip() or "understand"))
+
+
+def format_topic_hist_label(topic_key: str) -> str:
+    lec, tax = split_topic_key(topic_key)
+    tax_disp = tax.replace("_", " ").title()
+    if lec:
+        return f"{lec} ({tax_disp})"
+    return tax_disp
+
+
 def topic_key(q: Dict[str, Any]) -> str:
-    return str(q.get("taxonomy") or "understand")
+    tax = str(q.get("taxonomy") or "understand")
+    lec = (q.get("lecture_title") or q.get("lecture") or "").strip()
+    if not lec:
+        return tax
+    return f"{lec}::{tax}"
 
 
 def record_topic_outcome(state: Dict[str, Any], q: Dict[str, Any], correct: bool) -> None:

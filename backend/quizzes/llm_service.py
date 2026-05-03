@@ -519,6 +519,14 @@ def safe_json_load(text):
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+    # Object slice: first { ... last } (judge / tool JSON)
+    lb = text.find("{")
+    rb = text.rfind("}")
+    if lb >= 0 and rb > lb:
+        try:
+            return json.loads(text[lb : rb + 1])
+        except json.JSONDecodeError:
+            pass
     # Try to extract [ ... ] array
     arr_match = re.search(r'\[\s*\{[\s\S]*\}\s*\]', text)
     if arr_match:
@@ -886,7 +894,12 @@ def generate_adaptive_question_bank(
     ``learner_context`` optional text (theta, topic stats, prior sessions) appended to the prompt
     so the next bank can target weak areas across practice sets.
     """
-    from quizzes.chunk_catalog import build_chunk_catalog, catalog_chunk_map, format_catalog_for_prompt
+    from quizzes.chunk_catalog import (
+        build_chunk_catalog,
+        catalog_chunk_map,
+        format_catalog_for_prompt,
+        infer_lecture_title_for_question,
+    )
     from quizzes.mcq_validation import filter_valid_questions
     from quizzes.adaptive_practice import TAXONOMIES
 
@@ -909,12 +922,12 @@ CHUNK MANIFEST:
 
 SUPPORTING CONTEXT (may overlap the manifest):
 {context}
-{f"LEARNER PROGRESS (same course — weight generation toward weak Bloom levels / difficulties; avoid repeating only mastered topics):{chr(10)}{learner_context.strip()}{chr(10)}" if (learner_context and str(learner_context).strip()) else ""}
+{f"LEARNER PROGRESS (same course — weight generation toward weak lectures / Bloom levels / difficulties; avoid repeating only mastered topics):{chr(10)}{learner_context.strip()}{chr(10)}" if (learner_context and str(learner_context).strip()) else ""}
 RULES:
 1. Output ONLY a valid JSON array.
-2. Each object: "statement", "options" (array of 4 strings; place the correct answer first in the array), "correct_index" (0-3 matching that order), "explanation", "hint", "marks" (1-5), "difficulty" (easy/medium/hard), "taxonomy" (remember/understand/apply/analyze/evaluate/create), and "evidence" (array of 1-3 objects with "chunk_id" and "quote").
+2. Each object: "statement", "options" (array of 4 strings; place the correct answer first in the array), "correct_index" (0-3 matching that order), "explanation", "hint", "marks" (1-5), "difficulty" (easy/medium/hard), "taxonomy" (remember/understand/apply/analyze/evaluate/create), "lecture_title" (string: must equal one manifest chunk "source=" title for the lecture that question is primarily about), and "evidence" (array of 1-3 objects with "chunk_id" and "quote").
 3. Distractors must be plausible domain misconceptions, not joke answers.
-4. Vary difficulty and taxonomy across the set.
+4. Vary difficulty, taxonomy, and source lectures across the set.
 {MCQ_QUALITY_RULES}
 {EVIDENCE_SCHEMA_RULES}
 """
@@ -1041,6 +1054,45 @@ RULES:
         print(f"[AdaptiveBank] ERROR all items dropped raw_input={len(raw)} chunk_map={len(chunk_map)}")
         raise ValueError("Validation removed all generated questions; try different PDFs or a larger bank_size.")
 
+    for q in kept:
+        lt = infer_lecture_title_for_question(q, catalog, lecture_contents)
+        if lt:
+            q["lecture_title"] = lt
+
+    from quizzes.mcq_llm_judge import filter_questions_by_llm_judge
+
+    ctx_judge = build_rag_context(lecture_contents, max_chars=4000)
+    logger.info(
+        "[AdaptiveBank] llm_judge start pre_judge_n=%s ctx_chars=%s chunk_keys=%s",
+        len(kept),
+        len(ctx_judge),
+        len(chunk_map or {}),
+    )
+    print(
+        f"[AdaptiveBank] llm_judge start pre_judge_n={len(kept)} ctx_chars={len(ctx_judge)} "
+        f"chunk_keys={len(chunk_map or {})}"
+    )
+    kept, judge_rep = filter_questions_by_llm_judge(
+        kept, chunk_map if chunk_map else None, context_blurb=ctx_judge
+    )
+    logger.info(
+        "[AdaptiveBank] llm_judge done post_judge_n=%s degraded=%s provider=%s pass_rate=%s rejected=%s",
+        len(kept),
+        (judge_rep or {}).get("degraded"),
+        (judge_rep or {}).get("provider"),
+        (judge_rep or {}).get("pass_rate_pct"),
+        (judge_rep or {}).get("rejected_count"),
+    )
+    print(
+        f"[AdaptiveBank] llm_judge done post_judge_n={len(kept)} "
+        f"provider={(judge_rep or {}).get('provider')} pass_rate={(judge_rep or {}).get('pass_rate_pct')}"
+    )
+    if not kept:
+        raise ValueError(
+            "LLM quality judge rejected all items after deterministic validation. "
+            "Try more lecture text, lower MCQ_LLM_JUDGE_MIN_SCORE in settings, or set MCQ_LLM_JUDGE_STRICT=False."
+        )
+
     kept = kept[:n]
 
     t1 = time.monotonic()
@@ -1085,6 +1137,7 @@ RULES:
         "discrimination_note": "Point-biserial is computed when enough attempts exist per stratum (dashboard aggregates).",
         "human_review_sample_pct": None,
         "adaptive_engine": "hybrid_tabular_q_ucb_linear_td_with_theta_topic_balance",
+        "llm_judge": judge_rep,
     }
     out = {
         "questions": kept,
@@ -1105,9 +1158,10 @@ RULES:
     return out
 
 
-def generate_questions_with_fallback(lecture_contents, num_questions=5, chunk_size=1500):
+def generate_questions_with_fallback(lecture_contents, num_questions=5, chunk_size=1500, *, return_quality_report=False):
     """
     Try Groq first (low latency), then Gemini, then local Ollama.
+    Returned questions pass deterministic validation + LLM-as-judge (see ``mcq_llm_judge``).
     """
     num_questions = max(1, min(15, int(num_questions)))
 
@@ -1127,18 +1181,36 @@ RULES:
 4. Vary difficulty and taxonomy.
 {MCQ_QUALITY_RULES}
 """
+    raw: List[dict] = []
     groq_q = _parse_mc_questions_from_llm_text(call_groq_text(prompt, log_label="Groq:Questions"), num_questions)
     if groq_q:
         logger.info("[LLM] Parsed %d questions from Groq", len(groq_q))
-        return groq_q
+        raw = groq_q
 
-    gem_q = _parse_mc_questions_from_llm_text(call_gemini_text(prompt, log_label="Gemini:Questions"), num_questions)
-    if gem_q:
-        logger.info("[LLM] Parsed %d questions from Gemini", len(gem_q))
-        return gem_q
+    if not raw:
+        gem_q = _parse_mc_questions_from_llm_text(call_gemini_text(prompt, log_label="Gemini:Questions"), num_questions)
+        if gem_q:
+            logger.info("[LLM] Parsed %d questions from Gemini", len(gem_q))
+            raw = gem_q
 
-    logger.warning("[LLM] Groq + Gemini failed or invalid JSON; falling back to Ollama")
-    return generate_questions_from_content(lecture_contents, num_questions=num_questions, chunk_size=chunk_size)
+    if not raw:
+        logger.warning("[LLM] Groq + Gemini failed or invalid JSON; falling back to Ollama")
+        raw = generate_questions_from_content(lecture_contents, num_questions=num_questions, chunk_size=chunk_size)
+
+    if not raw:
+        if return_quality_report:
+            return [], {"validation_summary": {}, "llm_judge": {"notes": "no_raw_questions"}, "faithfulness_mean": None}
+        return []
+
+    from quizzes.mcq_llm_judge import apply_student_facing_mcqs_gate
+
+    final, qr = apply_student_facing_mcqs_gate(raw, lecture_contents, chunk_size=chunk_size)
+    final = final[:num_questions]
+    if not final:
+        logger.warning("[LLM] All items dropped after deterministic + LLM judge gate")
+    if return_quality_report:
+        return final, qr
+    return final
 
 
 # # -------------------------------

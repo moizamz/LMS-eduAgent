@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import generics, status, permissions, serializers
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.response import Response
@@ -5,6 +7,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db.models import Count, Avg
+from django.shortcuts import get_object_or_404
 from .models import (
     Quiz, Question, Choice, QuizAttempt, Answer,
     ChatSession, ChatMessage, ChatFile, PracticeSession,
@@ -21,6 +24,45 @@ from courses.models import Course, Enrollment, Section, Subsection
 from django.views.decorators.http import require_GET
 
 print("===== VIEWS.PY LOADED =====")
+
+
+def _adaptive_prior_session_digest(student, course, limit=5):
+    """Short lines about recent adaptive practice sessions for LLM context."""
+    rows = []
+    for sess in PracticeSession.objects.filter(student=student, course=course).order_by('-created_at')[:15]:
+        d = sess.data or {}
+        if d.get('mode') != 'adaptive':
+            continue
+        log = (d.get('adaptive') or {}).get('log') or []
+        if not log:
+            continue
+        c = sum(1 for e in log if e.get('is_correct'))
+        rows.append(f"prior session {sess.id}: {c}/{len(log)} correct adaptive items")
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _learner_context_for_bank_prompt(astate: dict, prior_lines: list) -> str:
+    """Human-readable block for adaptive bank generation (cross-session learning path)."""
+    lines = []
+    th = astate.get('topic_hist') or {}
+    if th:
+        lines.append('Per-topic adaptive accuracy (Bloom taxonomy):')
+        for tax, cell in sorted(th.items(), key=lambda kv: -int((kv[1] or {}).get('n', 0)))[:10]:
+            n = int((cell or {}).get('n', 0))
+            c = int((cell or {}).get('c', 0))
+            if n > 0:
+                lines.append(f"  - {tax}: {c}/{n} correct ({100.0 * c / n:.0f}%)")
+    try:
+        lines.append(f"Estimated ability theta (IRT-lite): {float(astate.get('theta', 0.0)):.2f}")
+    except (TypeError, ValueError):
+        lines.append('Estimated ability theta (IRT-lite): 0.0')
+    if prior_lines:
+        lines.append('Recent adaptive practice sets:')
+        lines.extend(f"  {ln}" for ln in prior_lines)
+    return "\n".join(lines) if lines else ""
+
 
 class QuizListView(generics.ListCreateAPIView):
     serializer_class = QuizSerializer
@@ -685,15 +727,22 @@ def adaptive_practice_start(request):
         bank_multiplier = int(request.data.get('bank_multiplier', 3))
     except (TypeError, ValueError):
         bank_multiplier = 3
+    try:
+        warmup_questions = int(request.data.get('warmup_questions', -1))
+    except (TypeError, ValueError):
+        warmup_questions = -1
 
     if not course_id:
         return Response({'error': 'course_id is required'}, status=status.HTTP_400_BAD_REQUEST)
     if not subsection_ids:
         return Response({'error': 'subsection_ids is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-    num_questions = max(1, min(15, num_questions))
+    num_questions = max(1, min(30, num_questions))
     bank_multiplier = max(1, min(5, bank_multiplier))
-    bank_size = min(45, max(num_questions, num_questions * bank_multiplier))
+    if warmup_questions < 0:
+        warmup_questions = min(5, num_questions)
+    warmup_questions = max(0, min(num_questions, warmup_questions))
+    bank_size = min(45, max(num_questions * bank_multiplier, num_questions + 3))
 
     try:
         course = Course.objects.get(id=course_id)
@@ -712,14 +761,17 @@ def adaptive_practice_start(request):
     if not subsections.exists():
         return Response({'error': 'No valid subsections with PDF found for this course'}, status=status.HTTP_400_BAD_REQUEST)
 
-    from quizzes.llm_service import extract_text_from_pdf, generate_questions_with_fallback
+    from quizzes.llm_service import extract_text_from_pdf, generate_adaptive_question_bank
     from quizzes.adaptive_practice import (
         accuracy_bucket,
         arm_index,
+        build_warmup_bank_order,
         merge_loaded_policy,
         normalize_question,
         pack_state,
+        sanitize_for_db_json,
         select_next_bank_id,
+        shuffle_mcq_for_display,
         time_bucket,
         total_bandit_pulls,
     )
@@ -739,60 +791,164 @@ def adaptive_practice_start(request):
     if not lecture_contents:
         return Response({'error': 'No lecture content could be extracted'}, status=status.HTTP_400_BAD_REQUEST)
 
-    try:
-        raw_bank = generate_questions_with_fallback(lecture_contents, num_questions=bank_size)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    bank = [normalize_question(q, i) for i, q in enumerate(raw_bank or [])]
-    if not bank:
-        return Response({'error': 'No questions generated for adaptive bank'}, status=status.HTTP_400_BAD_REQUEST)
-
     pol, _ = StudentAdaptivePolicyState.objects.get_or_create(
         student=request.user,
         course=course,
-        defaults={'q_table': {}, 'bandit': {}, 'lin_weights': []},
+        defaults={'q_table': {}, 'bandit': {}, 'lin_weights': [], 'ability_state': {}},
     )
-    q_table, bandit, lin_w = merge_loaded_policy(pol.q_table, pol.bandit, pol.lin_weights)
+    from quizzes.adaptive_theta import merge_ability_state
 
-    rng = random.Random()
-    used: set = set()
-    s0 = pack_state(2, time_bucket(None), accuracy_bucket(0, 0))
-    tb_pulls = total_bandit_pulls(bandit)
-    bid, arm = select_next_bank_id(s0, q_table, bandit, lin_w, bank, used, rng, tb_pulls)
-    if bid < 0:
-        return Response({'error': 'Could not select a question from bank'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    astate_pre = merge_ability_state(getattr(pol, 'ability_state', None))
+    prior_lines = _adaptive_prior_session_digest(request.user, course)
+    learner_context = _learner_context_for_bank_prompt(astate_pre, prior_lines)
 
-    used.add(bid)
-    first_q = next(q for q in bank if int(q['bank_id']) == bid)
+    try:
+        pack = generate_adaptive_question_bank(
+            lecture_contents,
+            bank_size=bank_size,
+            learner_context=learner_context or None,
+        )
+        raw_bank = pack.get('questions') or []
+        quality_report = pack.get('quality_report') or {}
+        chunk_catalog_ids = pack.get('chunk_catalog_ids') or []
+    except Exception as e:
+        logging.getLogger(__name__).exception(
+            '[AdaptiveStart] generate_adaptive_question_bank failed user=%s course=%s bank_size=%s',
+            getattr(request.user, 'pk', None),
+            course_id,
+            bank_size,
+        )
+        err_msg = str(e) or repr(e)
+        return Response({'error': err_msg[:4000]}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    session = PracticeSession.objects.create(
-        student=request.user,
-        course=course,
-        num_questions=num_questions,
-        num_correct=0,
-        data={
-            'mode': 'adaptive',
-            'bank': bank,
-            'used_bids': sorted(used),
-            'adaptive': {
-                'last_state': s0,
-                'last_arm': arm,
-                'pending_bid': bid,
-                'answered': 0,
-                'session_correct': 0,
-                'log': [],
-            },
-        },
-    )
+    try:
+        logging.getLogger(__name__).info(
+            '[AdaptiveStart] bank_pack user=%s course=%s raw_bank=%s quality_provider=%s',
+            getattr(request.user, 'pk', None),
+            course_id,
+            len(raw_bank or []),
+            (quality_report or {}).get('provider'),
+        )
+        print(
+            f"[AdaptiveStart] raw_bank={len(raw_bank or [])} "
+            f"provider={(quality_report or {}).get('provider')}"
+        )
 
-    return Response({
-        'session_id': session.id,
-        'total_questions': num_questions,
-        'bank_size': len(bank),
-        'question': first_q,
-        'policy': 'tabular_q_ucb_linear_td',
-    }, status=status.HTTP_201_CREATED)
+        bank = [normalize_question(q, i) for i, q in enumerate(raw_bank or [])]
+        if not bank:
+            return Response({'error': 'No questions generated for adaptive bank'}, status=status.HTTP_400_BAD_REQUEST)
+
+        q_table, bandit, lin_w = merge_loaded_policy(pol.q_table, pol.bandit, pol.lin_weights)
+
+        from quizzes.adaptive_theta import bank_id_boost_map, merge_ability_state
+
+        astate = merge_ability_state(getattr(pol, 'ability_state', None))
+        boosts = bank_id_boost_map(bank, set(), astate)
+
+        rng = random.Random()
+        used: set = set()
+        s0 = pack_state(2, time_bucket(None), accuracy_bucket(0, 0))
+        tb_pulls = total_bandit_pulls(bandit)
+        warmup_order = build_warmup_bank_order(bank, warmup_questions, rng)
+        logging.getLogger(__name__).info(
+            '[AdaptiveStart] warmup_order_len=%s num_questions=%s bank=%s',
+            len(warmup_order),
+            num_questions,
+            len(bank),
+        )
+        print(f"[AdaptiveStart] warmup_order_len={len(warmup_order)} num_questions={num_questions} bank={len(bank)}")
+
+        if warmup_order:
+            bid = int(warmup_order[0])
+            first_q = next((q for q in bank if int(q['bank_id']) == bid), None)
+            if first_q is None:
+                return Response({'error': 'Could not resolve warmup question in bank'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            arm = arm_index(str(first_q.get('difficulty', 'medium')), str(first_q.get('taxonomy', 'understand')))
+            used.add(bid)
+        else:
+            bid, arm = select_next_bank_id(s0, q_table, bandit, lin_w, bank, used, rng, tb_pulls, bank_boost=boosts)
+            logging.getLogger(__name__).info(
+                '[AdaptiveStart] select_next_bank_id bid=%s arm=%s bank=%s tb_pulls=%s',
+                bid,
+                arm,
+                len(bank),
+                tb_pulls,
+            )
+            print(f"[AdaptiveStart] select_next bid={bid} arm={arm} bank_len={len(bank)} tb_pulls={tb_pulls}")
+            if bid < 0:
+                return Response({'error': 'Could not select a question from bank'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            used.add(bid)
+            first_q = next((q for q in bank if int(q['bank_id']) == bid), None)
+            if first_q is None:
+                return Response({'error': 'Could not resolve selected question in bank'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        display_q = shuffle_mcq_for_display(first_q, random.Random())
+
+        session_payload = sanitize_for_db_json(
+            {
+                'mode': 'adaptive',
+                'bank': bank,
+                'used_bids': sorted(used),
+                'quality_report': quality_report,
+                'chunk_catalog_ids': chunk_catalog_ids,
+                'theta_trace': [float(astate.get('theta', 0.0))],
+                'adaptive': {
+                    'last_state': s0,
+                    'last_arm': arm,
+                    'pending_bid': bid,
+                    'answered': 0,
+                    'session_correct': 0,
+                    'log': [],
+                    'warmup_order': warmup_order,
+                },
+            }
+        )
+
+        try:
+            session = PracticeSession.objects.create(
+                student=request.user,
+                course=course,
+                num_questions=num_questions,
+                num_correct=0,
+                data=session_payload,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception('adaptive_practice_start: failed to persist session')
+            return Response(
+                {'error': f'Failed to save practice session: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        payload = sanitize_for_db_json(
+            {
+                'session_id': session.id,
+                'total_questions': num_questions,
+                'bank_size': len(bank),
+                'warmup_questions': len(warmup_order),
+                'selection_first': 'warmup' if warmup_order else 'policy',
+                'question': display_q,
+                'policy': 'hybrid_tabular_q_ucb_linear_td_theta_topic_balance',
+                'quality_preview': {
+                    'faithfulness_pct': quality_report.get('faithfulness_pct_display'),
+                    'coverage_blueprint_pct': quality_report.get('coverage_blueprint_pct'),
+                    'latency_ms': quality_report.get('latency_ms'),
+                },
+            }
+        )
+        logging.getLogger(__name__).info(
+            '[AdaptiveStart] created session_id=%s num_questions=%s',
+            session.id,
+            num_questions,
+        )
+        print(f"[AdaptiveStart] created session_id={session.id}")
+        return Response(payload, status=status.HTTP_201_CREATED)
+    except Exception as exc:
+        logging.getLogger(__name__).exception(
+            '[AdaptiveStart] after bank generation user=%s course=%s',
+            getattr(request.user, 'pk', None),
+            course_id,
+        )
+        err_msg = str(exc) or repr(exc)
+        return Response({'error': err_msg[:4000]}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -822,16 +978,19 @@ def adaptive_practice_step(request, pk):
 
     from quizzes.adaptive_practice import (
         accuracy_bucket,
+        arm_index,
         bandit_update,
         merge_loaded_policy,
         pack_state,
         q_learning_update,
         select_next_bank_id,
         shaped_reward,
+        shuffle_mcq_for_display,
         td_update_lin,
         time_bucket,
         total_bandit_pulls,
     )
+    from quizzes.adaptive_theta import bank_id_boost_map, merge_ability_state, record_topic_outcome, update_theta
 
     ad = data.get('adaptive') or {}
     bank = data.get('bank') or []
@@ -855,9 +1014,16 @@ def adaptive_practice_step(request, pk):
             q_table={},
             bandit={},
             lin_weights=[],
+            ability_state={},
         )
 
     q_table, bandit, lin_w = merge_loaded_policy(pol.q_table, pol.bandit, pol.lin_weights)
+
+    prev_q = next((x for x in bank if int(x.get('bank_id', -1)) == pending_bid), None)
+    astate = merge_ability_state(getattr(pol, 'ability_state', None))
+    if prev_q:
+        record_topic_outcome(astate, prev_q, is_correct)
+        astate['theta'] = update_theta(float(astate.get('theta', 0.0)), is_correct, str(prev_q.get('difficulty', 'medium')))
 
     r = shaped_reward(is_correct, time_seconds)
     answered_next = answered + 1
@@ -874,6 +1040,7 @@ def adaptive_practice_step(request, pk):
     pol.q_table = q_table
     pol.bandit = bandit
     pol.lin_weights = lin_w
+    pol.ability_state = astate
     pol.save()
 
     log = list(ad.get('log') or [])
@@ -888,6 +1055,11 @@ def adaptive_practice_step(request, pk):
     ad['session_correct'] = session_correct_next
     ad['log'] = log
 
+    before_trace = list(data.get('theta_trace') or [])
+    theta_session_start = float(before_trace[0]) if before_trace else float(astate.get('theta', 0.0))
+    trace = before_trace + [float(astate.get('theta', 0.0))]
+    data['theta_trace'] = trace[-80:]
+
     if answered_next >= session.num_questions:
         data['adaptive'] = ad
         session.data = data
@@ -896,12 +1068,46 @@ def adaptive_practice_step(request, pk):
             'done': True,
             'step': answered_next,
             'session_correct': session_correct_next,
+            'theta': float(astate.get('theta', 0.0)),
+            'theta_delta_session': round(float(astate.get('theta', 0.0)) - theta_session_start, 4),
         })
 
     used = set(int(x) for x in (data.get('used_bids') or []))
     rng = random.Random()
     tb_pulls = total_bandit_pulls(bandit)
-    next_bid, next_arm = select_next_bank_id(s_next, q_table, bandit, lin_w, bank, used, rng, tb_pulls)
+    boosts = bank_id_boost_map(bank, used, astate)
+    warmup_order = []
+    for x in ad.get('warmup_order') or []:
+        try:
+            warmup_order.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    next_q = None
+    if warmup_order and answered_next < len(warmup_order):
+        next_bid = int(warmup_order[answered_next])
+        next_q = next((q for q in bank if int(q.get('bank_id', -1)) == next_bid), None)
+        if next_q is None:
+            logging.getLogger(__name__).error(
+                '[AdaptiveStep] warmup bid %s missing from bank session=%s',
+                next_bid,
+                session.id,
+            )
+            data['adaptive'] = ad
+            session.data = data
+            session.save(update_fields=['data'])
+            return Response(
+                {'error': 'Warmup question missing from bank', 'done': True, 'bank_exhausted': True},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        next_arm = arm_index(str(next_q.get('difficulty', 'medium')), str(next_q.get('taxonomy', 'understand')))
+        logging.getLogger(__name__).info(
+            '[AdaptiveStep] warmup pick session=%s answered_next=%s bid=%s',
+            session.id,
+            answered_next,
+            next_bid,
+        )
+    else:
+        next_bid, next_arm = select_next_bank_id(s_next, q_table, bandit, lin_w, bank, used, rng, tb_pulls, bank_boost=boosts)
     if next_bid < 0:
         data['adaptive'] = ad
         session.data = data
@@ -911,6 +1117,8 @@ def adaptive_practice_step(request, pk):
             'step': answered_next,
             'session_correct': session_correct_next,
             'bank_exhausted': True,
+            'theta': float(astate.get('theta', 0.0)),
+            'theta_delta_session': round(float(astate.get('theta', 0.0)) - theta_session_start, 4),
         })
 
     used.add(next_bid)
@@ -922,12 +1130,159 @@ def adaptive_practice_step(request, pk):
     session.data = data
     session.save(update_fields=['data'])
 
-    next_q = next(q for q in bank if int(q['bank_id']) == next_bid)
+    if next_q is None:
+        next_q = next((q for q in bank if int(q.get('bank_id', -1)) == next_bid), None)
+    if next_q is None:
+        logging.getLogger(__name__).error('[AdaptiveStep] next_q None bid=%s session=%s', next_bid, session.id)
+        return Response({'error': 'Next question not found in bank', 'done': True}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    display_next = shuffle_mcq_for_display(next_q, random.Random())
+    sel_mode = 'warmup' if (warmup_order and answered_next < len(warmup_order)) else 'policy'
     return Response({
         'done': False,
         'step': answered_next + 1,
         'total_questions': session.num_questions,
-        'question': next_q,
+        'question': display_next,
         'session_correct': session_correct_next,
+        'theta': float(astate.get('theta', 0.0)),
+        'selection': sel_mode,
     })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def adaptive_learning_insights(request, course_id):
+    """
+    Pilot metrics, θ/topic analytics, weak-topic recommendations, generation quality aggregates.
+    """
+    if not request.user.is_student:
+        return Response({'error': 'Only students'}, status=status.HTTP_403_FORBIDDEN)
+    course = get_object_or_404(Course, id=course_id)
+    if not Enrollment.objects.filter(student=request.user, course=course).exists():
+        return Response({'error': 'Not enrolled'}, status=status.HTTP_403_FORBIDDEN)
+
+    pol = StudentAdaptivePolicyState.objects.filter(student=request.user, course=course).first()
+    ability = pol.ability_state if pol and isinstance(pol.ability_state, dict) else {}
+    theta_now = float(ability.get('theta', 0.0))
+    topic_hist = ability.get('topic_hist') or {}
+    stratum_acc = ability.get('stratum_accuracy') or {}
+
+    sessions = list(
+        PracticeSession.objects.filter(student=request.user, course=course)
+        .order_by('-created_at')[:30]
+    )
+
+    latencies = []
+    faiths = []
+    coverages = []
+    for s in sessions:
+        d = s.data or {}
+        if d.get('mode') != 'adaptive':
+            continue
+        qr = d.get('quality_report') or {}
+        if qr.get('latency_ms') is not None:
+            latencies.append(int(qr['latency_ms']))
+        if qr.get('faithfulness_mean') is not None:
+            faiths.append(float(qr['faithfulness_mean']))
+        if qr.get('coverage_blueprint_pct') is not None:
+            coverages.append(float(qr['coverage_blueprint_pct']))
+
+    def pctile(arr, p):
+        if not arr:
+            return None
+        xs = sorted(arr)
+        k = max(0, min(len(xs) - 1, int(round((p / 100.0) * (len(xs) - 1)))))
+        return xs[k]
+
+    weak_topics = []
+    for tax, cell in topic_hist.items():
+        n = int(cell.get('n', 0))
+        c = int(cell.get('c', 0))
+        if n < 2:
+            continue
+        p = c / max(1, n)
+        weak_topics.append(
+            {
+                'taxonomy': tax,
+                'attempts': n,
+                'accuracy': round(p * 100, 1),
+                'priority': round(max(0.0, 0.65 - p), 3),
+            }
+        )
+    weak_topics.sort(key=lambda x: x['priority'], reverse=True)
+
+    stratum_psych = []
+    for sk, cell in stratum_acc.items():
+        n = int(cell.get('n', 0))
+        c = int(cell.get('c', 0))
+        if n <= 0:
+            continue
+        p_val = c / n
+        disc = None
+        if n >= 8:
+            disc = round(min(1.0, max(-1.0, 2.0 * (p_val - 0.5))), 3)
+        stratum_psych.append(
+            {
+                'stratum': sk,
+                'n': n,
+                'p_value_empirical': round(p_val, 3),
+                'discrimination_proxy': disc,
+            }
+        )
+    stratum_psych.sort(key=lambda x: -x['n'])
+
+    last_quiz = (
+        QuizAttempt.objects.filter(student=request.user, quiz__course=course, is_completed=True)
+        .order_by('-submitted_at')
+        .first()
+    )
+    post_test_hint = None
+    if last_quiz and last_quiz.score is not None:
+        post_test_hint = {'last_quiz_score': float(last_quiz.score), 'quiz_title': last_quiz.quiz.title}
+
+    theta_deltas = []
+    for s in sessions:
+        d = s.data or {}
+        tr = d.get('theta_trace') or []
+        if len(tr) >= 2:
+            theta_deltas.append(float(tr[-1]) - float(tr[0]))
+
+    recommendations = []
+    for w in weak_topics[:5]:
+        recommendations.append(
+            {
+                'title': f"Strengthen: {w['taxonomy'].replace('_', ' ').title()}",
+                'detail': f"Accuracy {w['accuracy']}% over {w['attempts']} adaptive items — schedule focused review and short drills on this Bloom level.",
+            }
+        )
+
+    latest_bank_quality = None
+    for s in sessions:
+        d = s.data or {}
+        if d.get('mode') == 'adaptive' and d.get('quality_report'):
+            latest_bank_quality = d['quality_report']
+            break
+
+    return Response(
+        {
+            'course_id': course.id,
+            'theta': theta_now,
+            'topic_mastery': topic_hist,
+            'weak_topics': weak_topics,
+            'recommendations': recommendations,
+            'latest_bank_quality': latest_bank_quality,
+            'stratum_psychometrics': stratum_psych,
+            'generation_latency': {
+                'p50_ms': pctile(latencies, 50),
+                'p95_ms': pctile(latencies, 95),
+                'samples': len(latencies),
+            },
+            'faithfulness_series_mean': round(sum(faiths) / len(faiths), 3) if faiths else None,
+            'coverage_series_mean': round(sum(coverages) / len(coverages), 1) if coverages else None,
+            'theta_session_deltas': theta_deltas[:15],
+            'adaptive_effectiveness_note': 'theta_delta compares end vs start of each adaptive session trace.',
+            'human_review': {'sample_pct': 5, 'status': 'not_scheduled'},
+            'post_test': post_test_hint,
+            'policy_engine': 'hybrid_tabular_q_ucb_linear_td_theta_topic_balance',
+        }
+    )
 

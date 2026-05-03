@@ -182,6 +182,10 @@ class StudentAdaptivePolicyState(models.Model):
     q_table = models.JSONField(default=dict)
     bandit = models.JSONField(default=dict)
     lin_weights = models.JSONField(default=list)
+    ability_state = models.JSONField(
+        default=dict,
+        help_text="IRT-lite θ, per-topic accuracy, stratum stats for hybrid policy.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

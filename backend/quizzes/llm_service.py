@@ -6,15 +6,53 @@ Ollama uses streaming to avoid hanging and provide real-time progress updates.
 """
 
 import json
+import math
 import os
 import re
 import time
 import logging
 import threading
 import warnings
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(raw: Any, default: int) -> int:
+    """Coerce LLM JSON numbers; ``null`` / invalid → default (avoids int(None) TypeError)."""
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        try:
+            v = float(raw)
+            if not math.isfinite(v):
+                return default
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+
+def _coerce_correct_index(raw: Any, nopts: int) -> int:
+    if nopts <= 0:
+        return 0
+    return _safe_int(raw, 0) % nopts
+
+
+# Appended to all MCQ generation prompts (cloud + local).
+MCQ_QUALITY_RULES = """
+CONTENT QUALITY (strict — follow every line):
+5. Test substantive concepts from the lecture body: definitions used correctly, comparisons, procedures, cause-effect, small scenarios, or quantitative reasoning when the material supports it. Distractors must reflect common misconceptions from the domain.
+6. NEVER ask: the instructor's name; course or university branding; the document/PDF/book title or filename; authors' names unless the lecture explicitly teaches about that person as core content; page numbers; "what is the name of the …" for peripheral metadata; or anything answerable without understanding the technical ideas.
+7. Avoid lazy meta-questions ("according to the lecture", "what does the syllabus say"). Each statement should remain meaningful if section headings were stripped.
+8. If the excerpt is thin, output fewer strong questions in valid JSON rather than filler trivia.
+"""
+
+EVIDENCE_SCHEMA_RULES = """
+9. Include "evidence": an array of 1-3 objects {{"chunk_id": "<id from CHUNK MANIFEST>", "quote": "<verbatim excerpt from that chunk, ≤320 characters>"}}.
+10. Each quote MUST appear verbatim (aside from whitespace) inside the referenced chunk text. The explanation must be consistent with the evidence.
+"""
 
 
 def get_groq_api_key() -> str:
@@ -44,10 +82,18 @@ def get_groq_model() -> str:
     return (os.environ.get("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
 
 
-def call_groq_text(user_prompt: str, log_label: str = "Groq") -> Optional[str]:
+def call_groq_text(
+    user_prompt: str,
+    log_label: str = "Groq",
+    *,
+    max_tokens: int = 8192,
+) -> Optional[str]:
     """
     Single-turn chat completion via Groq (OpenAI-compatible HTTP API).
     Returns plain text or None if unavailable / failed / empty.
+
+    ``max_tokens`` counts toward Groq TPM / request-size limits; use a lower
+    value for very large prompts (e.g. adaptive banks with chunk manifests).
     """
     api_key = get_groq_api_key()
     if not api_key:
@@ -66,11 +112,12 @@ def call_groq_text(user_prompt: str, log_label: str = "Groq") -> Optional[str]:
         logger.info("[%s] Calling Groq model=%s", log_label, model)
         print(f"[{log_label}] Trying Groq model={model} …")
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        mt = max(256, min(8192, int(max_tokens)))
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": user_prompt}],
             temperature=0.35,
-            max_tokens=8192,
+            max_tokens=mt,
         )
         choice = resp.choices[0] if getattr(resp, "choices", None) else None
         msg = getattr(choice, "message", None) if choice else None
@@ -103,6 +150,30 @@ def get_gemini_api_key() -> str:
     return (os.environ.get("GEMINI_API_KEY") or "").strip()
 
 
+def _gemini_normalize_model_id(mid: str) -> str:
+    """Accept ``gemini-2.0-flash`` or full resource name ``models/gemini-2.0-flash``."""
+    s = (mid or "").strip()
+    if s.startswith("models/"):
+        return s.split("/", 1)[1].strip()
+    return s
+
+
+def _gemini_user_configured_model() -> str:
+    """
+    Model id from .env / environment first, then Django settings (decouple loads .env into settings).
+    This id is always tried before other Gemini candidates when Groq is skipped or fails.
+    """
+    v = _gemini_normalize_model_id(os.environ.get("GEMINI_MODEL") or "")
+    if v:
+        return v
+    try:
+        from django.conf import settings
+
+        return _gemini_normalize_model_id(str(getattr(settings, "GEMINI_MODEL", None) or ""))
+    except Exception:
+        return ""
+
+
 def _gemini_discover_model_ids(genai) -> List[str]:
     """Use ListModels so we only call generateContent on IDs the API actually exposes."""
     found: List[str] = []
@@ -133,6 +204,7 @@ def _gemini_discover_model_ids(genai) -> List[str]:
 def _gemini_static_fallback_ids() -> List[str]:
     """Versioned / preview IDs for when list_models is empty or outdated."""
     return [
+        "gemini-2.5-flash",
         "gemini-2.5-flash-preview-05-20",
         "gemini-2.0-flash",
         "gemini-2.0-flash-001",
@@ -140,28 +212,34 @@ def _gemini_static_fallback_ids() -> List[str]:
         "gemini-1.5-flash-latest",
         "gemini-1.5-pro-002",
         "gemini-1.5-pro-latest",
+        # Bare 1.5 names often 404 on v1beta; try last
         "gemini-1.5-flash",
         "gemini-1.5-pro",
     ]
 
 
 def _gemini_build_candidate_list(genai) -> List[str]:
-    """Ordered, deduplicated model IDs: settings override, API discovery, static fallbacks."""
+    """
+    Ordered Gemini candidates for fallback chain:
+
+    1. ``GEMINI_MODEL`` from environment (``.env`` → often exported) or Django settings
+    2. Other ids from ListModels (API discovery)
+    3. Static fallbacks
+
+    The configured model stays first; legacy bare 1.5 ids are deprioritized only among the tail.
+    """
     seen = set()
     out: List[str] = []
 
     def push(mid: Optional[str]) -> None:
-        s = (mid or "").strip()
+        s = _gemini_normalize_model_id(str(mid or ""))
         if s and s not in seen:
             seen.add(s)
             out.append(s)
 
-    try:
-        from django.conf import settings
-
-        push(getattr(settings, "GEMINI_MODEL", None))
-    except Exception:
-        pass
+    preferred = _gemini_user_configured_model()
+    if preferred:
+        push(preferred)
 
     for mid in _gemini_discover_model_ids(genai):
         push(mid)
@@ -169,7 +247,21 @@ def _gemini_build_candidate_list(genai) -> List[str]:
     for mid in _gemini_static_fallback_ids():
         push(mid)
 
-    return out
+    if preferred and preferred in out:
+        tail = _gemini_deprioritize_legacy_ids([x for x in out if x != preferred])
+        return [preferred] + tail
+    return _gemini_deprioritize_legacy_ids(out)
+
+
+def _gemini_deprioritize_legacy_ids(candidates: List[str]) -> List[str]:
+    """
+    Bare ``gemini-1.5-flash`` / ``gemini-1.5-pro`` often 404 on current v1beta; try
+    versioned IDs (from discovery / static list) first.
+    """
+    legacy = {"gemini-1.5-flash", "gemini-1.5-pro"}
+    head = [c for c in candidates if c not in legacy]
+    tail = [c for c in candidates if c in legacy]
+    return head + tail
 
 
 def _ollama_parse_model_ids(models_response) -> List[str]:
@@ -212,6 +304,9 @@ def call_gemini_text(user_prompt: str, log_label: str = "Gemini") -> Optional[st
     """
     Run a single user-style prompt on Gemini. Returns plain text or None if
     unavailable / all models failed / empty response.
+
+    Model order (after Groq is skipped or fails elsewhere): ``GEMINI_MODEL`` from
+    ``.env``/environment or Django settings → other ListModels ids → static fallbacks.
     """
     api_key = get_gemini_api_key()
     if not api_key:
@@ -230,8 +325,13 @@ def call_gemini_text(user_prompt: str, log_label: str = "Gemini") -> Optional[st
 
     genai.configure(api_key=api_key)
     candidates = _gemini_build_candidate_list(genai)
+    pref = _gemini_user_configured_model()
     if candidates:
-        print(f"[{log_label}] Gemini candidate models ({len(candidates)}): {', '.join(candidates[:6])}{'…' if len(candidates) > 6 else ''}")
+        head = f"(configured GEMINI_MODEL first: {pref}) " if pref else ""
+        print(
+            f"[{log_label}] Gemini order {head}— {len(candidates)} candidates: "
+            f"{', '.join(candidates[:8])}{'…' if len(candidates) > 8 else ''}"
+        )
 
     last_err: Optional[Exception] = None
     for model_name in candidates:
@@ -521,11 +621,18 @@ def _call_ollama_streaming(client, model, messages, options, timeout_seconds=300
 # ---------------------------------------------------------
 # OLLAMA LLM - RAG-BASED QUESTION GENERATION
 # ---------------------------------------------------------
-def generate_questions_from_content(lecture_contents, num_questions=5, chunk_size=1500):
+def generate_questions_from_content(
+    lecture_contents,
+    num_questions=5,
+    chunk_size=1500,
+    manifest_block: str = "",
+    require_evidence_rules: bool = False,
+):
     """
     RAG pipeline: chunk lecture content, build context, call Ollama Llama3.
     lecture_contents: list of dicts with 'title' and 'text'
     num_questions: target number of questions to generate
+    Optional manifest_block: CHUNK MANIFEST text for grounded evidence fields.
     Returns list of question dicts.
     """
     logger.info("[LLM] generate_questions_from_content: %d lectures, num_questions=%s", len(lecture_contents), num_questions)
@@ -562,7 +669,9 @@ def generate_questions_from_content(lecture_contents, num_questions=5, chunk_siz
         logger.warning("[LLM] No lecture content in context")
         raise ValueError("No lecture content provided")
 
-    num_questions = max(1, min(15, int(num_questions)))
+    num_questions = max(1, min(45, int(num_questions)))
+
+    extra_ev = EVIDENCE_SCHEMA_RULES if require_evidence_rules else ""
 
     user_prompt = """Generate exactly __NUM__ multiple-choice questions from this lecture content.
 
@@ -574,6 +683,7 @@ RULES:
 2. Each object: "statement", "options" (array of 4 strings, correct first), "correct_index" (0-3), "explanation", "hint", "marks" (1-5), "difficulty" (easy/medium/hard), "taxonomy" (remember/understand/apply/analyze/evaluate/create).
 3. Distractors must be plausible. Do not repeat lecture titles in statements.
 4. Vary difficulty and taxonomy.
+""" + MCQ_QUALITY_RULES + extra_ev + """
 
 Example format:
 [{{"statement":"What is X?","options":["A","B","C","D"],"correct_index":0,"explanation":"Because...","hint":"Consider...","marks":1,"difficulty":"medium","taxonomy":"understand"}}]
@@ -635,7 +745,10 @@ Examples:
 """
 
     user_prompt = user_prompt.replace("__NUM__", str(num_questions))
-    user_prompt = user_prompt.replace("__CONTEXT__", context)
+    ctx_block = context
+    if manifest_block and str(manifest_block).strip():
+        ctx_block = context + "\n\n--- CHUNK MANIFEST (IDs for evidence.chunk_id) ---\n" + str(manifest_block).strip()
+    user_prompt = user_prompt.replace("__CONTEXT__", ctx_block)
 
     max_retries = 3
     raw = None
@@ -696,12 +809,9 @@ Examples:
             opts = opts[:4]
         if not opts:
             continue
-        try:
-            marks_val = int(q.get("marks", 1))
-        except Exception:
-            marks_val = 1
-        correct_idx = int(q.get("correct_index", 0)) % len(opts)
-        questions.append({
+        marks_val = _safe_int(q.get("marks"), 1)
+        correct_idx = _coerce_correct_index(q.get("correct_index"), len(opts))
+        row: Dict[str, Any] = {
             "statement": str(q.get("statement", "")).strip() or f"Question {i+1}",
             "options": opts,
             "correct_index": correct_idx,
@@ -710,20 +820,28 @@ Examples:
             "marks": max(1, min(5, marks_val)),
             "difficulty": q.get("difficulty") if q.get("difficulty") in ("easy", "medium", "hard") else "medium",
             "taxonomy": q.get("taxonomy") if q.get("taxonomy") in ("remember", "understand", "apply", "analyze", "evaluate", "create") else "understand",
-        })
+        }
+        ev = q.get("evidence")
+        if isinstance(ev, list) and ev:
+            row["evidence"] = ev
+        questions.append(row)
 
     print(f"[LLM] Successfully built {len(questions)} questions.")
     return questions[:num_questions]
 
 
-def _parse_mc_questions_from_llm_text(text: Optional[str], num_questions: int) -> List[dict]:
+def _parse_mc_questions_from_llm_text(text: Optional[str], num_questions: int, max_items: int = 15) -> List[dict]:
     """Parse JSON array of MCQ objects from a single model response string."""
     if not text or not isinstance(text, str):
         return []
+    text = text.strip()
+    lb = text.find("[")
+    if lb > 0:
+        text = text[lb:]
     raw = safe_json_load(text)
     if not raw or not isinstance(raw, list):
         return []
-    num_questions = max(1, min(15, int(num_questions)))
+    num_questions = max(1, min(max_items, int(num_questions)))
     questions = []
     for i, q in enumerate(raw):
         if not isinstance(q, dict):
@@ -736,12 +854,9 @@ def _parse_mc_questions_from_llm_text(text: Optional[str], num_questions: int) -
             opts = opts[:4]
         if not opts:
             continue
-        try:
-            marks_val = int(q.get("marks", 1))
-        except Exception:
-            marks_val = 1
-        correct_idx = int(q.get("correct_index", 0)) % len(opts)
-        questions.append({
+        marks_val = _safe_int(q.get("marks"), 1)
+        correct_idx = _coerce_correct_index(q.get("correct_index"), len(opts))
+        row: Dict[str, Any] = {
             "statement": str(q.get("statement", "")).strip() or f"Question {i+1}",
             "options": opts,
             "correct_index": correct_idx,
@@ -750,8 +865,244 @@ def _parse_mc_questions_from_llm_text(text: Optional[str], num_questions: int) -
             "marks": max(1, min(5, marks_val)),
             "difficulty": q.get("difficulty") if q.get("difficulty") in ("easy", "medium", "hard") else "medium",
             "taxonomy": q.get("taxonomy") if q.get("taxonomy") in ("remember", "understand", "apply", "analyze", "evaluate", "create") else "understand",
-        })
+        }
+        ev = q.get("evidence")
+        if isinstance(ev, list) and ev:
+            row["evidence"] = ev
+        questions.append(row)
     return questions[:num_questions]
+
+
+def generate_adaptive_question_bank(
+    lecture_contents: List[Dict[str, Any]],
+    bank_size: int,
+    chunk_size: int = 1200,
+    learner_context: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Grounded MCQ bank with validation metrics for adaptive practice.
+    Returns {questions, quality_report, chunk_catalog_ids}.
+
+    ``learner_context`` optional text (theta, topic stats, prior sessions) appended to the prompt
+    so the next bank can target weak areas across practice sets.
+    """
+    from quizzes.chunk_catalog import build_chunk_catalog, catalog_chunk_map, format_catalog_for_prompt
+    from quizzes.mcq_validation import filter_valid_questions
+    from quizzes.adaptive_practice import TAXONOMIES
+
+    t0 = time.monotonic()
+    catalog = build_chunk_catalog(lecture_contents, chunk_size=chunk_size, overlap=180)
+    chunk_map = catalog_chunk_map(catalog)
+    # Keep prompt compact: Groq free tier TPM rejects ~9k+ token requests on 8b instant.
+    manifest = format_catalog_for_prompt(catalog, max_chars=5200)
+    context = build_rag_context(lecture_contents, max_chars=2800)
+
+    n = max(1, min(45, int(bank_size)))
+    gen_n = min(45, n + 6)
+
+    prompt = f"""Generate exactly {gen_n} multiple-choice questions from this lecture material.
+
+A CHUNK MANIFEST with stable IDs is provided. Each question MUST include grounded evidence citing chunk IDs from the manifest.
+
+CHUNK MANIFEST:
+{manifest}
+
+SUPPORTING CONTEXT (may overlap the manifest):
+{context}
+{f"LEARNER PROGRESS (same course — weight generation toward weak Bloom levels / difficulties; avoid repeating only mastered topics):{chr(10)}{learner_context.strip()}{chr(10)}" if (learner_context and str(learner_context).strip()) else ""}
+RULES:
+1. Output ONLY a valid JSON array.
+2. Each object: "statement", "options" (array of 4 strings; place the correct answer first in the array), "correct_index" (0-3 matching that order), "explanation", "hint", "marks" (1-5), "difficulty" (easy/medium/hard), "taxonomy" (remember/understand/apply/analyze/evaluate/create), and "evidence" (array of 1-3 objects with "chunk_id" and "quote").
+3. Distractors must be plausible domain misconceptions, not joke answers.
+4. Vary difficulty and taxonomy across the set.
+{MCQ_QUALITY_RULES}
+{EVIDENCE_SCHEMA_RULES}
+"""
+
+    used_provider = "none"
+    raw: List[dict] = []
+    gem_text: Optional[str] = None
+    logger.info(
+        "[AdaptiveBank] start bank_size=%s gen_n=%s catalog_entries=%s manifest_chars=%s context_chars=%s",
+        bank_size,
+        gen_n,
+        len(catalog),
+        len(manifest),
+        len(context),
+    )
+    print(
+        f"[AdaptiveBank] start bank_size={bank_size} gen_n={gen_n} "
+        f"catalog={len(catalog)} manifest_chars={len(manifest)} context_chars={len(context)}"
+    )
+
+    groq_text = call_groq_text(prompt, log_label="Groq:AdaptiveBank", max_tokens=8192)
+    if groq_text:
+        used_provider = "groq"
+        raw = _parse_mc_questions_from_llm_text(groq_text, gen_n, max_items=45)
+        logger.info(
+            "[AdaptiveBank] after Groq: text_chars=%s parsed_items=%s",
+            len(groq_text),
+            len(raw),
+        )
+        print(f"[AdaptiveBank] after Groq: text_chars={len(groq_text)} parsed_items={len(raw)}")
+
+    # Gemini only when Groq did not return a body (HTTP/empty). If Groq returned
+    # text but JSON failed to parse, fall through to Ollama — do not call Gemini.
+    if not raw and not groq_text:
+        gem_text = call_gemini_text(prompt, log_label="Gemini:AdaptiveBank")
+        if gem_text:
+            used_provider = "gemini"
+            raw = _parse_mc_questions_from_llm_text(gem_text, gen_n, max_items=45)
+            logger.info(
+                "[AdaptiveBank] after Gemini: text_chars=%s parsed_items=%s",
+                len(gem_text),
+                len(raw),
+            )
+            print(f"[AdaptiveBank] after Gemini: text_chars={len(gem_text)} parsed_items={len(raw)}")
+
+    # Ollama only when no cloud body implied a successful *response*: if Gemini returned text but
+    # JSON parse yielded nothing, do not call local LLM (same policy as Groq→Gemini).
+    if not raw:
+        if gem_text:
+            logger.error(
+                "[AdaptiveBank] Gemini returned %s chars but parser produced 0 items; skipping Ollama",
+                len(gem_text),
+            )
+            print(
+                f"[AdaptiveBank] ERROR Gemini body present ({len(gem_text)} chars) but 0 parsed MCQs — "
+                "not calling Ollama."
+            )
+            raise ValueError(
+                "Adaptive bank: Gemini returned a response but no multiple-choice items could be parsed "
+                "(output may be prose, malformed JSON, or truncated). Try lowering bank_multiplier / "
+                "num_questions, or adjust GEMINI_MODEL."
+            )
+        used_provider = "ollama" if used_provider == "none" else used_provider
+        reason = "Groq had no body" if not groq_text else "Groq body present but 0 parsed items"
+        logger.info(
+            "[AdaptiveBank] invoking Ollama (%s); used_provider=%s",
+            reason,
+            used_provider,
+        )
+        print(f"[AdaptiveBank] invoking Ollama ({reason}) used_provider={used_provider}")
+        ollama_raw = generate_questions_from_content(
+            lecture_contents,
+            num_questions=gen_n,
+            chunk_size=chunk_size,
+            manifest_block=manifest,
+            require_evidence_rules=True,
+        )
+        if ollama_raw:
+            used_provider = "ollama"
+            raw = ollama_raw
+        logger.info("[AdaptiveBank] after Ollama: parsed_items=%s", len(raw))
+        print(f"[AdaptiveBank] after Ollama: parsed_items={len(raw)}")
+
+    if not raw:
+        raise ValueError(
+            "Adaptive bank: no multiple-choice items could be parsed from any provider. "
+            "If Groq returned text but JSON failed, Ollama was tried next; if Groq had no body and Gemini "
+            "was skipped or failed, ensure Ollama is running or fix API keys. "
+            "You can also lower bank_multiplier / num_questions."
+        )
+
+    kept, summ = filter_valid_questions(raw, chunk_map, min_faithfulness=0.45)
+    logger.info(
+        "[AdaptiveBank] validation strict: kept=%s dropped=%s mean_faith=%s",
+        summ.get("kept_count"),
+        summ.get("dropped_count"),
+        round(float(summ.get("mean_faithfulness") or 0.0), 4),
+    )
+    print(
+        f"[AdaptiveBank] validation strict: kept={summ.get('kept_count')} "
+        f"dropped={summ.get('dropped_count')} mean_faith={summ.get('mean_faithfulness')}"
+    )
+    if len(kept) < max(4, n // 2):
+        kept2, summ2 = filter_valid_questions(raw, None, min_faithfulness=0.0)
+        if len(kept2) > len(kept):
+            kept, summ = kept2, summ2
+            summ["relaxed_citations"] = True
+            logger.info(
+                "[AdaptiveBank] validation relaxed citations: kept=%s dropped=%s",
+                summ.get("kept_count"),
+                summ.get("dropped_count"),
+            )
+            print(
+                f"[AdaptiveBank] validation relaxed: kept={summ.get('kept_count')} "
+                f"dropped={summ.get('dropped_count')}"
+            )
+
+    if not kept:
+        logger.error(
+            "[AdaptiveBank] all items dropped after validation raw_input=%s chunk_ids=%s",
+            len(raw),
+            len(chunk_map),
+        )
+        print(f"[AdaptiveBank] ERROR all items dropped raw_input={len(raw)} chunk_map={len(chunk_map)}")
+        raise ValueError("Validation removed all generated questions; try different PDFs or a larger bank_size.")
+
+    kept = kept[:n]
+
+    t1 = time.monotonic()
+    latency_ms = int((t1 - t0) * 1000)
+    prompt_chars = len(prompt)
+    try:
+        raw_chars = len(json.dumps(raw, allow_nan=False)) if raw else 0
+    except (TypeError, ValueError):
+        raw_chars = 0
+    tokens_est = int(prompt_chars / 4 + raw_chars / 4)
+
+    cov = {tx: 0 for tx in TAXONOMIES}
+    for q in kept:
+        tx = q.get("taxonomy")
+        if tx in cov:
+            cov[tx] += 1
+    covered = sum(1 for tx in TAXONOMIES if cov.get(tx, 0) > 0)
+    coverage_pct = round(100.0 * covered / len(TAXONOMIES), 1)
+
+    faith_vals: List[float] = []
+    for q in kept:
+        from quizzes.mcq_validation import validate_mcq_item
+
+        vr = validate_mcq_item(q, chunk_map, min_faithfulness=0.0)
+        fv = float(vr.faithfulness)
+        faith_vals.append(fv if math.isfinite(fv) else 0.0)
+    faith_mean = round(sum(faith_vals) / max(1, len(faith_vals)), 3)
+    if not math.isfinite(faith_mean):
+        faith_mean = 0.0
+
+    report = {
+        "latency_ms": latency_ms,
+        "provider": used_provider,
+        "tokens_estimated": tokens_est,
+        "tokens_per_item_est": round(tokens_est / max(1, len(kept)), 1),
+        "validation_summary": summ,
+        "faithfulness_mean": faith_mean,
+        "faithfulness_pct_display": round(100.0 * faith_mean, 1) if math.isfinite(faith_mean) else 0.0,
+        "coverage_blueprint_pct": coverage_pct,
+        "taxonomy_counts": cov,
+        "p_value_note": "Empirical difficulty (p-value) updates as learners respond; see stratum_accuracy in your policy state.",
+        "discrimination_note": "Point-biserial is computed when enough attempts exist per stratum (dashboard aggregates).",
+        "human_review_sample_pct": None,
+        "adaptive_engine": "hybrid_tabular_q_ucb_linear_td_with_theta_topic_balance",
+    }
+    out = {
+        "questions": kept,
+        "quality_report": report,
+        "chunk_catalog_ids": [c.get("id") for c in catalog if c.get("id")],
+    }
+    logger.info(
+        "[AdaptiveBank] done provider=%s final_kept=%s coverage_pct=%s faith_mean=%s",
+        used_provider,
+        len(kept),
+        coverage_pct,
+        faith_mean,
+    )
+    print(
+        f"[AdaptiveBank] done provider={used_provider} final_kept={len(kept)} "
+        f"coverage_pct={coverage_pct} faith_mean={faith_mean}"
+    )
+    return out
 
 
 def generate_questions_with_fallback(lecture_contents, num_questions=5, chunk_size=1500):
@@ -774,6 +1125,7 @@ RULES:
 2. Each object: "statement", "options" (array of 4 strings, correct first), "correct_index" (0-3), "explanation", "hint", "marks" (1-5), "difficulty" (easy/medium/hard), "taxonomy" (remember/understand/apply/analyze/evaluate/create).
 3. Distractors must be plausible. Do not repeat lecture titles in statements.
 4. Vary difficulty and taxonomy.
+{MCQ_QUALITY_RULES}
 """
     groq_q = _parse_mc_questions_from_llm_text(call_groq_text(prompt, log_label="Groq:Questions"), num_questions)
     if groq_q:

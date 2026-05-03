@@ -12,9 +12,14 @@ selects which arm to pull next, then a random unused question from that stratum.
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+_log = logging.getLogger(__name__)
+
+from quizzes.adaptive_theta import weighted_choice_bid
 
 DIFFICULTIES: Tuple[str, ...] = ("easy", "medium", "hard")
 TAXONOMIES: Tuple[str, ...] = (
@@ -67,6 +72,50 @@ def normalize_question(q: Dict[str, Any], bid: int) -> Dict[str, Any]:
     return out
 
 
+def sanitize_for_db_json(obj: Any) -> Any:
+    """
+    Recursively clean structures before JSONField save: NaN/Inf break strict JSON
+    on some DB backends; NUL bytes can break Postgres JSONB.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, int):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, str):
+        return obj.replace("\x00", "")
+    if isinstance(obj, dict):
+        return {str(k): sanitize_for_db_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_for_db_json(v) for v in obj]
+    return str(obj)
+
+
+def shuffle_mcq_for_display(q: Dict[str, Any], rng: random.Random) -> Dict[str, Any]:
+    """
+    Randomize option order for each presentation. Updates correct_index to match.
+    Bank storage keeps canonical order; call this when sending a question to the client.
+    """
+    out = dict(q)
+    opts = list(out.get("options") or [])
+    if len(opts) < 2:
+        return out
+    try:
+        ci = int(out.get("correct_index", 0)) % len(opts)
+    except (TypeError, ValueError):
+        ci = 0
+    indexed = list(enumerate(opts))
+    rng.shuffle(indexed)
+    new_opts = [t[1] for t in indexed]
+    new_ci = next(j for j, (orig_i, _) in enumerate(indexed) if orig_i == ci)
+    out["options"] = new_opts
+    out["correct_index"] = new_ci
+    return out
+
+
 def time_bucket(seconds: Optional[float]) -> int:
     """0=fast, 1=medium, 2=slow (supports 'time on question' signals)."""
     if seconds is None:
@@ -111,7 +160,18 @@ def phi_sa(state_id: int, arm: int) -> List[float]:
 
 
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
+    t = 0.0
+    for x, y in zip(a, b):
+        try:
+            xf, yf = float(x), float(y)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(xf) and math.isfinite(yf)):
+            continue
+        p = xf * yf
+        if math.isfinite(p):
+            t += p
+    return t if math.isfinite(t) else 0.0
 
 
 def q_linear(state_id: int, arm: int, weights: Sequence[float]) -> float:
@@ -149,11 +209,19 @@ def arm_key(arm: int) -> str:
 
 
 def get_q_tab(q_table: Dict[str, float], s: int, a: int) -> float:
-    return float(q_table.get(f"{int(s)}|{int(a)}", 0.0))
+    try:
+        v = float(q_table.get(f"{int(s)}|{int(a)}", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
 
 
 def set_q_tab(q_table: Dict[str, float], s: int, a: int, value: float) -> None:
-    q_table[f"{int(s)}|{int(a)}"] = float(value)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = 0.0
+    q_table[f"{int(s)}|{int(a)}"] = v if math.isfinite(v) else 0.0
 
 
 def q_learning_update(
@@ -196,19 +264,38 @@ def ucb_values(bandit: Dict[str, Dict[str, float]], total_pulls: int) -> List[fl
 
 
 def _normalize_scores(vals: List[float]) -> List[float]:
-    finite = [v for v in vals if not math.isinf(v)]
+    """Map scores to [0,1]-ish range; NaN / Inf-safe so ``max`` / ties never break arm selection."""
+    finite = [v for v in vals if math.isfinite(v)]
     if not finite:
         return [0.0] * len(vals)
     lo, hi = min(finite), max(finite)
-    if hi - lo < 1e-6:
+    if not math.isfinite(lo) or not math.isfinite(hi) or hi - lo < 1e-6:
         return [0.0 for _ in vals]
-    out = []
+    out: List[float] = []
     for v in vals:
-        if math.isinf(v):
+        if math.isinf(v) and v > 0:
             out.append(1.0)
+        elif not math.isfinite(v):
+            out.append(0.0)
         else:
             out.append((v - lo) / (hi - lo))
     return out
+
+
+def build_warmup_bank_order(bank: List[Dict[str, Any]], warmup_count: int, rng: random.Random) -> List[int]:
+    """
+    First N questions of a session: random spread across bank_ids (no policy yet).
+    After warmup_count answers, ``select_next_bank_id`` drives the remainder from the same bank.
+    """
+    if warmup_count <= 0 or not bank:
+        return []
+    bids = sorted({int(q["bank_id"]) for q in bank if int(q.get("bank_id", -1)) >= 0})
+    if not bids:
+        return []
+    order = list(bids)
+    rng.shuffle(order)
+    k = min(int(warmup_count), len(order))
+    return order[:k]
 
 
 def build_unused_by_arm(
@@ -233,6 +320,7 @@ def select_next_bank_id(
     used: Set[int],
     rng: random.Random,
     total_bandit_pulls: int,
+    bank_boost: Optional[Dict[int, float]] = None,
 ) -> Tuple[int, int]:
     """
     Returns (bank_id, arm_chosen).
@@ -248,8 +336,11 @@ def select_next_bank_id(
         ]
         if not all_unused:
             return -1, -1
-        bid = rng.choice(all_unused)
-        qref = next(x for x in bank if int(x.get("bank_id")) == bid)
+        bid = weighted_choice_bid(rng, all_unused, bank_boost or {})
+        qref = next((x for x in bank if int(x.get("bank_id")) == bid), None)
+        if qref is None:
+            _log.error("select_next_bank_id: bid %s not found in bank (fallback branch)", bid)
+            return -1, -1
         arm = arm_index(str(qref.get("difficulty")), str(qref.get("taxonomy")))
         return bid, arm
 
@@ -263,13 +354,29 @@ def select_next_bank_id(
     uc_sub = [ucb_all[a] for a in available_arms]
     un = _normalize_scores(uc_sub)
 
-    combined = []
+    combined: List[float] = []
     for i, arm in enumerate(available_arms):
-        combined.append(W_TABULAR * qn[i] + W_LINEAR * ln[i] + W_UCB * un[i])
+        s = W_TABULAR * qn[i] + W_LINEAR * ln[i] + W_UCB * un[i]
+        combined.append(s if math.isfinite(s) else 0.0)
+    if not combined:
+        _log.error("select_next_bank_id: empty combined scores state_id=%s arms=%s", state_id, available_arms)
+        return -1, -1
     best = max(combined)
-    top = [available_arms[i] for i, sc in enumerate(combined) if abs(sc - best) < 1e-9]
+    if not math.isfinite(best):
+        best = 0.0
+    top = [available_arms[i] for i, sc in enumerate(combined) if math.isfinite(sc) and abs(sc - best) < 1e-9]
+    if not top:
+        _log.warning(
+            "select_next_bank_id: empty top after tie-break; falling back to all available_arms "
+            "(state_id=%s best=%s combined=%s)",
+            state_id,
+            best,
+            combined[:6],
+        )
+        top = list(available_arms)
     chosen_arm = rng.choice(top)
-    bid = rng.choice(by_arm[chosen_arm])
+    pool = by_arm[chosen_arm]
+    bid = weighted_choice_bid(rng, pool, bank_boost or {})
     return bid, chosen_arm
 
 
@@ -301,14 +408,37 @@ def merge_loaded_policy(
     bandit: Optional[dict],
     lin_weights: Optional[list],
 ) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]], List[float]]:
-    qt = dict(q_table or {})
+    qt: Dict[str, float] = {}
+    for k, v in (q_table or {}).items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            fv = 0.0
+        qt[str(k)] = fv if math.isfinite(fv) else 0.0
     bd: Dict[str, Dict[str, float]] = {}
     for k, v in (bandit or {}).items():
         if isinstance(v, dict):
-            bd[str(k)] = {"n": float(v.get("n", 0)), "sum_r": float(v.get("sum_r", 0.0))}
+            try:
+                n = float(v.get("n", 0))
+                sr = float(v.get("sum_r", 0.0))
+            except (TypeError, ValueError):
+                n, sr = 0.0, 0.0
+            bd[str(k)] = {
+                "n": n if math.isfinite(n) else 0.0,
+                "sum_r": sr if math.isfinite(sr) else 0.0,
+            }
     lw = list(lin_weights or [])
     if len(lw) != FEATURE_DIM:
         lw = [0.0] * FEATURE_DIM
+    else:
+        fixed: List[float] = []
+        for x in lw:
+            try:
+                fx = float(x)
+            except (TypeError, ValueError):
+                fx = 0.0
+            fixed.append(fx if math.isfinite(fx) else 0.0)
+        lw = fixed
     return qt, bd, lw
 
 

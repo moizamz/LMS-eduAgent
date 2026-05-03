@@ -7,4 +7,9 @@ urlpatterns = [
     path('course/<int:course_id>/summary/', views.course_gamification_summary, name='gamification_course_summary'),
     path('course/<int:course_id>/history/', views.course_gamification_history, name='gamification_course_history'),
     path('course/<int:course_id>/leaderboard/', views.course_leaderboard, name='gamification_course_leaderboard'),
+    path(
+        'instructor/course/<int:course_id>/students/',
+        views.instructor_course_students_progress,
+        name='gamification_instructor_course_students',
+    ),
 ]

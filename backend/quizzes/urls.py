@@ -10,6 +10,7 @@ urlpatterns = [
     path('generate-questions/', views.generate_questions, name='generate_questions'),
     path('adaptive-practice/start/', views.adaptive_practice_start, name='adaptive_practice_start'),
     path('adaptive-practice/session/<int:pk>/step/', views.adaptive_practice_step, name='adaptive_practice_step'),
+    path('adaptive-insights/<int:course_id>/', views.adaptive_learning_insights, name='adaptive_learning_insights'),
     path('chat/', views.chat_with_files, name='chat_with_files'),
     path('chat-sessions/', views.chat_session_list, name='chat_session_list'),
     path('chat-sessions/<int:pk>/', views.chat_session_detail, name='chat_session_detail'),

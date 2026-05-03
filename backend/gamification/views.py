@@ -1,6 +1,7 @@
 import random
 from datetime import timedelta
 
+from django.db.models import Count, Max, Sum
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
@@ -22,6 +23,20 @@ from gamification.reward_engine import (
     xp_to_next_level,
     _merge_bandit,
 )
+
+
+def _user_can_view_course_leaderboard(user, course: Course) -> bool:
+    if getattr(user, 'is_admin', False):
+        return True
+    if getattr(user, 'is_instructor', False) and course.instructor_id == user.id:
+        return True
+    return Enrollment.objects.filter(student=user, course=course).exists()
+
+
+def _user_instructs_course(user, course: Course) -> bool:
+    if getattr(user, 'is_admin', False):
+        return True
+    return getattr(user, 'is_instructor', False) and course.instructor_id == user.id
 
 
 def _serialize_state(state: StudentGamificationState, earned_slugs: set) -> dict:
@@ -257,8 +272,8 @@ def course_leaderboard(request, course_id):
     except Course.DoesNotExist:
         return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    if not Enrollment.objects.filter(student=request.user, course=course).exists():
-        return Response({'error': 'Not enrolled'}, status=status.HTTP_403_FORBIDDEN)
+    if not _user_can_view_course_leaderboard(request.user, course):
+        return Response({'error': 'Not allowed to view this leaderboard'}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         limit = min(50, max(5, int(request.query_params.get('limit', 20))))
@@ -282,11 +297,52 @@ def course_leaderboard(request, course_id):
                 'level': level_from_xp(int(s.total_xp)),
                 'current_streak_days': s.current_streak_days,
                 'badge_count': badge_count,
-                'is_you': st.id == request.user.id,
+                'is_you': (st.id == request.user.id) if getattr(request.user, 'is_student', False) else False,
             }
         )
 
     return Response({'course_id': course.id, 'entries': rows})
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def instructor_course_students_progress(request, course_id):
+    """Per-student progress %, XP, streaks, badges for instructors/admins."""
+    try:
+        course = Course.objects.get(id=course_id)
+    except Course.DoesNotExist:
+        return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_instructs_course(request.user, course):
+        return Response({'error': 'Only the course instructor or admin'}, status=status.HTTP_403_FORBIDDEN)
+
+    enrollments = Enrollment.objects.filter(course=course).select_related('student')
+    states = {s.student_id: s for s in StudentGamificationState.objects.filter(course=course)}
+    badge_rows = EarnedBadge.objects.filter(course=course).values('student_id').annotate(n=Count('id'))
+    badge_map = {r['student_id']: r['n'] for r in badge_rows}
+
+    students = []
+    for e in enrollments:
+        st = e.student
+        if st.role != 'student':
+            continue
+        gs = states.get(st.id)
+        xp = int(gs.total_xp) if gs else 0
+        students.append(
+            {
+                'student_id': st.id,
+                'username': st.username,
+                'display_name': (st.first_name or st.username or '').strip(),
+                'progress_percentage': round(float(e.progress_percentage or 0), 1),
+                'total_xp': xp,
+                'level': level_from_xp(xp),
+                'current_streak_days': int(gs.current_streak_days) if gs else 0,
+                'longest_streak_days': int(gs.longest_streak_days) if gs else 0,
+                'badge_count': int(badge_map.get(st.id, 0)),
+            }
+        )
+    students.sort(key=lambda r: r['total_xp'], reverse=True)
+    return Response({'course_id': course.id, 'students': students})
 
 
 @api_view(['GET'])
@@ -372,6 +428,8 @@ def student_gamification_dashboard(request):
     if not request.user.is_student:
         return Response({'error': 'Only students'}, status=status.HTTP_403_FORBIDDEN)
 
+    from quizzes.models import PracticeSession, QuizAttempt
+
     states = StudentGamificationState.objects.filter(student=request.user).select_related('course')
     total_xp = sum(int(s.total_xp) for s in states)
     courses = []
@@ -414,6 +472,53 @@ def student_gamification_dashboard(request):
 
     badge_total = EarnedBadge.objects.filter(student=request.user).count()
 
+    practice_sec = PracticeSession.objects.filter(student=request.user).aggregate(s=Sum('duration_seconds'))['s'] or 0
+    try:
+        practice_sec = int(practice_sec)
+    except (TypeError, ValueError):
+        practice_sec = 0
+
+    quiz_sec = 0
+    for a in QuizAttempt.objects.filter(student=request.user, is_completed=True).exclude(submitted_at=None):
+        try:
+            quiz_sec += max(0, int((a.submitted_at - a.started_at).total_seconds()))
+        except Exception:
+            pass
+
+    total_practice_quiz_hours = round((practice_sec + quiz_sec) / 3600.0, 2)
+
+    streak_agg = StudentGamificationState.objects.filter(student=request.user).aggregate(
+        longest=Max('longest_streak_days'),
+        current_best=Max('current_streak_days'),
+    )
+    longest_streak_days = int(streak_agg['longest'] or 0)
+    current_streak_best_course = int(streak_agg['current_best'] or 0)
+
+    today = timezone.localdate()
+    activity_dates = set()
+    window_start = timezone.now() - timedelta(days=14)
+    for e in RewardLedgerEntry.objects.filter(student=request.user, created_at__gte=window_start):
+        activity_dates.add(timezone.localtime(e.created_at).date())
+    for p in PracticeSession.objects.filter(student=request.user, created_at__gte=window_start):
+        activity_dates.add(timezone.localtime(p.created_at).date())
+        if p.completed_at:
+            activity_dates.add(timezone.localtime(p.completed_at).date())
+    for a in QuizAttempt.objects.filter(student=request.user, started_at__gte=window_start):
+        activity_dates.add(timezone.localtime(a.started_at).date())
+        if a.submitted_at:
+            activity_dates.add(timezone.localtime(a.submitted_at).date())
+
+    week_activity = []
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        week_activity.append({'date': d.isoformat(), 'active': d in activity_dates})
+
+    weekly_active_streak_days = 0
+    d = today
+    while d in activity_dates:
+        weekly_active_streak_days += 1
+        d -= timedelta(days=1)
+
     return Response(
         {
             'total_xp_across_courses': total_xp,
@@ -421,5 +526,10 @@ def student_gamification_dashboard(request):
             'courses': courses,
             'recent_activity': recent,
             'xp_by_day': xp_by_day,
+            'total_practice_quiz_hours': total_practice_quiz_hours,
+            'longest_streak_days': longest_streak_days,
+            'current_streak_best_course': current_streak_best_course,
+            'weekly_active_streak_days': weekly_active_streak_days,
+            'week_activity': week_activity,
         }
     )

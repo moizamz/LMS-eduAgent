@@ -15,10 +15,16 @@ import {
   DialogActions,
   TextField,
 } from '@mui/material';
-import { Add, Edit, Delete } from '@mui/icons-material';
+import { Add, Edit, Delete, MenuBook } from '@mui/icons-material';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 import { useNavigate } from 'react-router-dom';
+import {
+  sectionHeaderBandSx,
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 
 const InstructorPanel = () => {
   const [courses, setCourses] = useState([]);
@@ -77,22 +83,38 @@ const InstructorPanel = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Typography variant="h4">My Courses</Typography>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={() => setOpenDialog(true)}
-        >
-          Create Course
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+      <Box
+        sx={{
+          ...sectionHeaderBandSx,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 2,
+          mb: 3,
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap', minWidth: 0 }}>
+          <MenuBook color="primary" sx={{ fontSize: 28 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            My courses
+          </Typography>
+        </Box>
+        <Button variant="contained" startIcon={<Add />} onClick={() => setOpenDialog(true)}>
+          Create course
         </Button>
       </Box>
 
@@ -179,7 +201,8 @@ const InstructorPanel = () => {
           </Button>
         </DialogActions>
       </Dialog>
-    </Container>
+      </Container>
+    </Box>
   );
 };
 

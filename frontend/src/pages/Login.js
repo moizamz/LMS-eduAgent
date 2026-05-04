@@ -16,14 +16,10 @@ import {
 } from '@mui/material';
 import {
   Email,
-  Lock,
   Visibility,
   VisibilityOff,
-  School,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
-import logo from '../assets/logo.png'
-
 const Login = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -128,66 +124,6 @@ const Login = () => {
                 backdropFilter: 'blur(10px)',
               }}
             >
-              {/* Header */}
-              <Box
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  mb: 3,
-                }}
-              >
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  {/* <Box
-                    sx={{
-                      width: 40,
-                      height: 40,
-                      borderRadius: '50%',
-                      background: 'linear-gradient(145deg, #8b5cf6, #6366f1)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      boxShadow: '0 10px 25px rgba(79, 70, 229, 0.35)',
-                    }}
-                  > */}
-                    {/* <School sx={{ color: '#ffffff', fontSize: 22 }} /> */}
-                    <img src={logo} alt="EduAgent" style={{ width: 40, height: 40 }} />
-                  {/* </Box> */}
-                  <Box>
-                    <Typography
-                      variant="h5"
-                      sx={{ fontWeight: 700, letterSpacing: 0.4 }}
-                    >
-                      EduAgent
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: '#64748b' }}>
-                      Learning Management System
-                    </Typography>
-                  </Box>
-                </Box>
-
-                <Button
-                  component={RouterLink}
-                  to="/register"
-                  variant="outlined"
-                  size="small"
-                  sx={{
-                    textTransform: 'none',
-                    borderRadius: 999,
-                    borderColor: '#c4b5fd',
-                    color: '#7c3aed',
-                    fontWeight: 600,
-                    px: 2,
-                    '&:hover': {
-                      borderColor: '#7c3aed',
-                      backgroundColor: 'rgba(124, 58, 237, 0.04)',
-                    },
-                  }}
-                >
-                  Create account
-                </Button>
-              </Box>
-
               <Typography
                 variant="h4"
                 sx={{

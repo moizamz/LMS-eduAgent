@@ -16,6 +16,13 @@ import { TrendingUp, EmojiEvents, Psychology } from '@mui/icons-material';
 import { format, parseISO } from 'date-fns';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../services/api';
+import {
+  sectionHeaderBandSx,
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 
 function XpByDayChart({ points }) {
   if (!points?.length) {
@@ -27,13 +34,13 @@ function XpByDayChart({ points }) {
   }
   const max = Math.max(1, ...points.map((p) => p.xp || 0));
   return (
-    <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 1, flexWrap: 'wrap', minHeight: 120, pt: 2 }}>
+    <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 1, flexWrap: 'wrap', minHeight: 88, pt: 1.5 }}>
       {points.map((p) => (
         <Box key={p.date} sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 36 }}>
           <Box
             sx={{
               width: 28,
-              height: `${Math.max(8, (p.xp / max) * 72)}px`,
+              height: `${Math.max(6, (p.xp / max) * 52)}px`,
               borderRadius: '6px 6px 0 0',
               background: 'linear-gradient(180deg, #c4b5fd, #7c3aed)',
               transition: 'height 0.2s ease',
@@ -136,67 +143,103 @@ const MyProgress = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
+  /** Same footprint for all four “My learning” insight cards (width + min height). */
+  const insightCardSx = {
+    height: '100%',
+    minHeight: { xs: 200, md: 260 },
+    display: 'flex',
+    flexDirection: 'column',
+  };
+  const insightCardContentSx = {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    pt: 1.5,
+    '&:last-child': { pb: 1.5 },
+  };
+  const insightBodyScrollSx = {
+    flex: 1,
+    minHeight: 0,
+    overflow: 'auto',
+    mt: 1,
+  };
+
   return (
-    <Box sx={{ backgroundColor: '#f5f5f5', minHeight: '100vh', py: 4 }}>
-      <Container maxWidth="lg">
-        <Box display="flex" alignItems="center" mb={3}>
-          <TrendingUp sx={{ mr: 2, color: '#8b5cf6', fontSize: 32 }} />
-          <Typography variant="h4" sx={{ color: '#212121', fontWeight: 700 }}>
-            My Progress
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <TrendingUp color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            My progress
           </Typography>
         </Box>
 
-        {user?.role === 'student' && learningSummary && (
+        {user?.role === 'student' && (learningSummary || rewardDash) && (
           <Box sx={{ mb: 4 }}>
-            <Paper
-              elevation={0}
-              sx={{
-                p: 2,
-                mb: 2,
-                textAlign: 'center',
-                background: 'linear-gradient(90deg, #ede9fe 0%, #faf5ff 45%, #fff 100%)',
-                border: '1px solid #ddd6fe',
-              }}
-            >
-              <Typography variant="overline" sx={{ letterSpacing: 3, color: '#4c1d95', fontWeight: 700 }}>
-                MY LEARNING
-              </Typography>
-              <Typography variant="caption" display="block" color="text.secondary">
-                Adaptive ability, topics, and quiz trajectory across your courses
-              </Typography>
-            </Paper>
-            <Grid container spacing={3}>
-              <Grid item xs={12} md={5}>
-                <Card sx={{ boxShadow: '0 2px 12px rgba(124,58,237,0.12)', height: '100%' }}>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-                      <Psychology color="primary" />
-                      Ability (θ) by course
-                    </Typography>
-                    <ThetaByCourseChart courses={learningSummary.courses} />
-                  </CardContent>
-                </Card>
-              </Grid>
-              <Grid item xs={12} md={7}>
-                <Card sx={{ boxShadow: '0 2px 12px rgba(124,58,237,0.12)' }}>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 2 }}>
-                      Course detail
-                    </Typography>
-                    {!learningSummary.courses?.length ? (
-                      <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
-                        No enrollments yet, or adaptive practice has not updated your profile. Open a course, run adaptive
-                        practice, and your θ / topic strengths will appear here.
-                      </Typography>
-                    ) : (
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 420, overflow: 'auto' }}>
-                      {learningSummary.courses.map((c) => (
+            {learningSummary && (
+              <Paper
+                elevation={0}
+                sx={{
+                  p: 2,
+                  mb: 2,
+                  textAlign: 'center',
+                  ...sectionHeaderBandSx,
+                }}
+              >
+                <Typography variant="overline" sx={{ letterSpacing: 3, color: '#4c1d95', fontWeight: 700 }}>
+                  MY LEARNING
+                </Typography>
+                <Typography variant="caption" display="block" color="text.secondary">
+                  Adaptive ability, topics, and quiz trajectory across your courses
+                </Typography>
+              </Paper>
+            )}
+            <Grid container spacing={3} alignItems="stretch">
+              {learningSummary && (
+                <>
+                  <Grid item xs={12} md={6}>
+                    <Card sx={insightCardSx}>
+                      <CardContent sx={insightCardContentSx}>
+                        <Typography
+                          variant="h6"
+                          sx={{ fontWeight: 700, color: '#4c1d95', mb: 0, display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}
+                        >
+                          <Psychology color="primary" />
+                          Ability (θ) by course
+                        </Typography>
+                        <Box sx={insightBodyScrollSx}>
+                          <ThetaByCourseChart courses={learningSummary.courses} />
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <Card sx={insightCardSx}>
+                      <CardContent sx={insightCardContentSx}>
+                        <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 0, flexShrink: 0 }}>
+                          Course detail
+                        </Typography>
+                        {!learningSummary.courses?.length ? (
+                          <Box sx={insightBodyScrollSx}>
+                            <Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>
+                              No enrollments yet, or adaptive practice has not updated your profile. Open a course, run adaptive
+                              practice, and your θ / topic strengths will appear here.
+                            </Typography>
+                          </Box>
+                        ) : (
+                          <Box sx={{ ...insightBodyScrollSx, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {learningSummary.courses.map((c) => (
                         <Box
                           key={c.course_id}
                           sx={{
@@ -293,80 +336,83 @@ const MyProgress = () => {
                               }}
                             />
                           )}
+                            </Box>
+                            ))}
+                          </Box>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                </>
+              )}
+              {rewardDash && (
+                <>
+                  <Grid item xs={12} md={6}>
+                    <Card sx={insightCardSx}>
+                      <CardContent sx={insightCardContentSx}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0, flexShrink: 0 }}>
+                          <EmojiEvents sx={{ color: '#8b5cf6' }} />
+                          <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95' }}>
+                            XP pulse (14 days)
+                          </Typography>
                         </Box>
-                      ))}
-                    </Box>
-                    )}
-                  </CardContent>
-                </Card>
-              </Grid>
+                        <Box sx={insightBodyScrollSx}>
+                          <XpByDayChart points={rewardDash.xp_by_day || []} />
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <Card sx={insightCardSx}>
+                      <CardContent sx={insightCardContentSx}>
+                        <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 0, flexShrink: 0 }}>
+                          Recent rewards & nudges
+                        </Typography>
+                        <Box sx={{ ...insightBodyScrollSx, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+                          {(rewardDash.recent_activity || []).length === 0 ? (
+                            <Typography variant="body2" color="text.secondary">
+                              Nothing here yet — your personalized lines will appear after your next XP event.
+                            </Typography>
+                          ) : (
+                            rewardDash.recent_activity.map((row, idx) => (
+                              <Box
+                                key={`${row.created_at}-${idx}`}
+                                sx={{
+                                  p: 1.25,
+                                  borderRadius: 2,
+                                  borderLeft: '4px solid #a78bfa',
+                                  bgcolor: 'rgba(250,245,255,0.9)',
+                                }}
+                              >
+                                <Typography variant="caption" color="text.secondary">
+                                  {(() => {
+                                    try {
+                                      return format(parseISO(row.created_at), 'MMM d, HH:mm');
+                                    } catch {
+                                      return row.created_at;
+                                    }
+                                  })()}{' '}
+                                  · {row.course_title}
+                                </Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600, mt: 0.35, textTransform: 'capitalize' }}>
+                                  {row.event_type?.replace(/_/g, ' ')} · +{row.points} XP
+                                </Typography>
+                                {row.remark ? (
+                                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                                    {row.remark}
+                                  </Typography>
+                                ) : null}
+                              </Box>
+                            ))
+                          )}
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                </>
+              )}
             </Grid>
           </Box>
-        )}
-
-        {user?.role === 'student' && rewardDash && (
-          <Grid container spacing={3} sx={{ mb: 4 }}>
-            <Grid item xs={12} md={6}>
-              <Card sx={{ boxShadow: '0 2px 12px rgba(124,58,237,0.12)' }}>
-                <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-                    <EmojiEvents sx={{ color: '#8b5cf6' }} />
-                    <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95' }}>
-                      XP pulse (14 days)
-                    </Typography>
-                  </Box>
-                  <XpByDayChart points={rewardDash.xp_by_day || []} />
-                </CardContent>
-              </Card>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <Card sx={{ boxShadow: '0 2px 12px rgba(124,58,237,0.12)' }}>
-                <CardContent>
-                  <Typography variant="h6" sx={{ fontWeight: 700, color: '#4c1d95', mb: 2 }}>
-                    Recent rewards & nudges
-                  </Typography>
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, maxHeight: 280, overflow: 'auto' }}>
-                    {(rewardDash.recent_activity || []).length === 0 ? (
-                      <Typography variant="body2" color="text.secondary">
-                        Nothing here yet — your personalized lines will appear after your next XP event.
-                      </Typography>
-                    ) : (
-                      rewardDash.recent_activity.map((row, idx) => (
-                        <Box
-                          key={`${row.created_at}-${idx}`}
-                          sx={{
-                            p: 1.25,
-                            borderRadius: 2,
-                            borderLeft: '4px solid #a78bfa',
-                            bgcolor: 'rgba(250,245,255,0.9)',
-                          }}
-                        >
-                          <Typography variant="caption" color="text.secondary">
-                            {(() => {
-                              try {
-                                return format(parseISO(row.created_at), 'MMM d, HH:mm');
-                              } catch {
-                                return row.created_at;
-                              }
-                            })()}{' '}
-                            · {row.course_title}
-                          </Typography>
-                          <Typography variant="body2" sx={{ fontWeight: 600, mt: 0.35, textTransform: 'capitalize' }}>
-                            {row.event_type?.replace(/_/g, ' ')} · +{row.points} XP
-                          </Typography>
-                          {row.remark ? (
-                            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                              {row.remark}
-                            </Typography>
-                          ) : null}
-                        </Box>
-                      ))
-                    )}
-                  </Box>
-                </CardContent>
-              </Card>
-            </Grid>
-          </Grid>
         )}
 
         <Typography variant="h6" sx={{ fontWeight: 600, color: '#212121', mb: 2 }}>

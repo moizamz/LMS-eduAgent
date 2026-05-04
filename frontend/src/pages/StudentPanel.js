@@ -15,6 +15,12 @@ import {
   Divider,
 } from '@mui/material';
 import { School, Assignment, Quiz, EmojiEvents } from '@mui/icons-material';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
@@ -29,6 +35,7 @@ const StudentPanel = () => {
 
   useEffect(() => {
     fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchData is recreated each render; tabValue drives reload
   }, [tabValue]);
 
   const fetchData = async () => {
@@ -59,19 +66,27 @@ const StudentPanel = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Typography variant="h4" gutterBottom>
-        Student Panel
-      </Typography>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <School color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            Student workspace
+          </Typography>
+        </Box>
 
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
+      <Box sx={{ mb: 3 }}>
         <Tabs value={tabValue} onChange={(e, newValue) => setTabValue(newValue)}>
           <Tab icon={<School />} label="My Courses" />
           <Tab icon={<Assignment />} label="Assignments" />
@@ -269,7 +284,8 @@ const StudentPanel = () => {
           )}
         </Grid>
       )}
-    </Container>
+      </Container>
+    </Box>
   );
 };
 

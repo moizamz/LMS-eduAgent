@@ -9,6 +9,7 @@ from rest_framework.response import Response
 
 from courses.models import Course, Enrollment
 from gamification.models import EarnedBadge, RewardLedgerEntry, StudentGamificationState
+from gamification.student_dashboard_insights import build_student_dashboard_insights
 from gamification.personalized_nudge import generate_personalized_remark
 from gamification.reward_engine import (
     ARM_LABELS,
@@ -519,6 +520,8 @@ def student_gamification_dashboard(request):
         weekly_active_streak_days += 1
         d -= timedelta(days=1)
 
+    insights = build_student_dashboard_insights(request.user)
+
     return Response(
         {
             'total_xp_across_courses': total_xp,
@@ -531,5 +534,6 @@ def student_gamification_dashboard(request):
             'current_streak_best_course': current_streak_best_course,
             'weekly_active_streak_days': weekly_active_streak_days,
             'week_activity': week_activity,
+            'insights': insights,
         }
     )

@@ -23,6 +23,7 @@ export const AuthProvider = ({ children }) => {
     } else {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run on token only; fetchUser closes over latest logout/setUser
   }, [token]);
 
   const fetchUser = async () => {

@@ -22,6 +22,13 @@ import {
   Divider,
 } from '@mui/material';
 import { Person, School, CheckCircle, Block, Analytics } from '@mui/icons-material';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+  workspaceTablePaperSx,
+} from '../theme/eduAgentSurfaces';
 import api from '../services/api';
 import { toast } from 'react-toastify';
 
@@ -36,6 +43,7 @@ const AdminPanel = () => {
 
   useEffect(() => {
     fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchData is recreated each render; tabValue drives reload
   }, [tabValue]);
 
   const fetchData = async () => {
@@ -109,12 +117,16 @@ const AdminPanel = () => {
   };
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Typography variant="h4" gutterBottom>
-        Admin Panel
-      </Typography>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <Analytics color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            Admin
+          </Typography>
+        </Box>
 
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
+      <Box sx={{ mb: 3 }}>
         <Tabs value={tabValue} onChange={(e, newValue) => setTabValue(newValue)}>
           <Tab label="Instructors" />
           <Tab label="Students" />
@@ -131,7 +143,7 @@ const AdminPanel = () => {
       ) : (
         <>
           {tabValue === 0 && (
-            <TableContainer component={Paper}>
+            <TableContainer component={Paper} sx={workspaceTablePaperSx}>
               <Table>
                 <TableHead>
                   <TableRow>
@@ -207,7 +219,7 @@ const AdminPanel = () => {
           )}
 
           {tabValue === 1 && (
-            <TableContainer component={Paper}>
+            <TableContainer component={Paper} sx={workspaceTablePaperSx}>
               <Table>
                 <TableHead>
                   <TableRow>
@@ -258,7 +270,7 @@ const AdminPanel = () => {
           )}
 
           {tabValue === 2 && (
-            <TableContainer component={Paper}>
+            <TableContainer component={Paper} sx={workspaceTablePaperSx}>
               <Table>
                 <TableHead>
                   <TableRow>
@@ -560,7 +572,8 @@ const AdminPanel = () => {
           )}
         </>
       )}
-    </Container>
+      </Container>
+    </Box>
   );
 };
 

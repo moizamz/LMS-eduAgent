@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Container,
@@ -12,9 +12,17 @@ import {
   Button,
   Chip,
 } from '@mui/material';
-import { EmojiEvents, TrendingUp } from '@mui/icons-material';
+import { EmojiEvents, TrendingUp, Insights as InsightsIcon, AutoAwesome } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../services/api';
+import {
+  insightVariantPalette,
+  sectionHeaderBandSx,
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 
 const Dashboard = () => {
   const { user } = useAuth();
@@ -42,6 +50,65 @@ const Dashboard = () => {
   const [instructorAttempts, setInstructorAttempts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [rewardDash, setRewardDash] = useState(null);
+  const [studentInsights, setStudentInsights] = useState([]);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      if (isStudent) {
+        try {
+          const response = await api.get('/quizzes/my-attempts/');
+          const attempts = Array.isArray(response.data) ? response.data : [];
+          const completed = attempts.filter((a) => a.is_completed && a.score !== null && a.score !== undefined);
+          if (completed.length > 0) {
+            const scores = completed.map((a) => Number(a.score));
+            const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+            const highest = Math.max(...scores);
+            const lowest = Math.min(...scores);
+            const last = Number(completed[0].score);
+            setStats((prev) => ({
+              ...prev,
+              avgQuizScore: avg,
+              highestScore: highest,
+              lowestScore: lowest,
+              lastQuizScore: last,
+            }));
+          }
+        } catch (error) {
+          console.error('Error fetching quiz attempts:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching stats:', error);
+    }
+  }, [isStudent]);
+
+  const fetchEnrollments = async () => {
+    try {
+      const response = await api.get('/courses/my-enrollments/');
+      setEnrollments(Array.isArray(response.data) ? response.data : []);
+    } catch (error) {
+      console.error('Error fetching enrollments:', error);
+    }
+  };
+
+  const fetchRewardDashboard = useCallback(async () => {
+    try {
+      const res = await api.get('/gamification/student/dashboard/');
+      setRewardDash(res.data);
+      const d = res.data || {};
+      setStudentInsights(Array.isArray(d.insights) ? d.insights : []);
+      setStats((prev) => ({
+        ...prev,
+        totalTimeSpent: d.total_practice_quiz_hours ?? 0,
+        weeklyStreak: d.weekly_active_streak_days ?? 0,
+        longestStreak: d.longest_streak_days ?? 0,
+      }));
+    } catch (error) {
+      console.error('Error fetching gamification dashboard:', error);
+      setRewardDash(null);
+      setStudentInsights([]);
+    }
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -61,67 +128,18 @@ const Dashboard = () => {
 
     loadDashboard();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]);
+  }, [user, fetchRewardDashboard, fetchStats]);
 
-  const fetchStats = async () => {
-    try {
-      // Fetch quiz attempts for student
-      if (isStudent) {
-        try {
-          const response = await api.get('/quizzes/my-attempts/');
-          const attempts = Array.isArray(response.data) ? response.data : [];
-          if (attempts.length > 0) {
-            const scores = attempts
-              .filter(a => a.is_completed && a.score !== null)
-              .map(a => a.score);
-            if (scores.length > 0) {
-              const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
-              const highest = Math.max(...scores);
-              const lowest = Math.min(...scores);
-              const last = scores[scores.length - 1];
-              setStats(prev => ({
-                ...prev,
-                avgQuizScore: avg,
-                highestScore: highest,
-                lowestScore: lowest,
-                lastQuizScore: last,
-              }));
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching quiz attempts:', error);
-        }
-      }
-    } catch (error) {
-      console.error('Error fetching stats:', error);
-    }
-  };
-
-  const fetchEnrollments = async () => {
-    try {
-      const response = await api.get('/courses/my-enrollments/');
-      setEnrollments(Array.isArray(response.data) ? response.data : []);
-    } catch (error) {
-      console.error('Error fetching enrollments:', error);
-    }
-  };
-
-  const fetchRewardDashboard = async () => {
-    try {
-      const res = await api.get('/gamification/student/dashboard/');
-      setRewardDash(res.data);
-      const d = res.data || {};
-      setStats((prev) => ({
-        ...prev,
-        totalTimeSpent: d.total_practice_quiz_hours ?? 0,
-        weeklyStreak: d.weekly_active_streak_days ?? 0,
-        longestStreak: d.longest_streak_days ?? 0,
-      }));
-    } catch (error) {
-      console.error('Error fetching gamification dashboard:', error);
-      setRewardDash(null);
-    }
-  };
+  useEffect(() => {
+    if (!isStudent || !user) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      fetchRewardDashboard();
+      fetchStats();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [isStudent, user, fetchRewardDashboard, fetchStats]);
 
   const fetchInstructorData = async () => {
     try {
@@ -180,55 +198,69 @@ const Dashboard = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={{ ...workspacePageBackgroundSx, py: 4, textAlign: 'left' }}>
+        <Container maxWidth="xl" sx={{ ...workspaceContentContainerSx, textAlign: 'left' }}>
+          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '40vh' }}>
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
-  // Top summary cards: same size in one row with a simple hover effect
+  // KPI layout (surface look comes from global MuiCard theme in App.js)
   const statCardStyle = {
-    backgroundColor: '#ffffff',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
-    borderRadius: 2,
-    // Fixed height so all top dashboard boxes look exactly the same size
-    height: 230,
+    textAlign: 'center',
+    width: '100%',
+    height: '100%',
     display: 'flex',
     flexDirection: 'column',
-    transition: 'box-shadow 0.15s ease-in-out, background-color 0.15s ease-in-out',
-    '&:hover': {
-      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
-      backgroundColor: '#faf5ff',
-      cursor: 'pointer',
+    overflow: 'hidden',
+    '& .MuiCardContent-root': {
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
     },
   };
 
-  // Course cards keep the original style without the strong hover lift
   const courseCardStyle = {
     backgroundColor: '#ffffff',
     boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
     borderRadius: 2,
+    textAlign: 'left',
+  };
+
+  /** Stat / KPI rows: equal-width cards across full container width */
+  const statRowSx = {
+    display: 'flex',
+    gap: 2,
+    mb: 4,
+    flexWrap: { xs: 'wrap', md: 'nowrap' },
+    width: '100%',
+    alignItems: 'stretch',
+  };
+  const statSlotSx = {
+    flex: { xs: '1 1 100%', md: '1 1 0' },
+    minWidth: { xs: '100%', sm: 200, md: 0 },
+    display: 'flex',
+    alignItems: 'stretch',
   };
 
   return (
-    <Box sx={{ backgroundColor: '#f5f5f5', minHeight: '100vh', py: 4 }}>
-      <Container maxWidth="lg">
-        <Typography variant="h4" sx={{ fontWeight: 700, color: '#212121', mb: 4 }}>
-          Dashboard
-        </Typography>
+    <Box sx={{ ...workspacePageBackgroundSx, py: 4, textAlign: 'left' }}>
+      <Container maxWidth="xl" sx={{ ...workspaceContentContainerSx, textAlign: 'left' }}>
+        <Box sx={{ ...workspacePageHeadingRowSx, mb: 4 }}>
+          <InsightsIcon color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            Dashboard
+          </Typography>
+        </Box>
 
         {isInstructorLike ? (
           <>
             {/* Instructor / Admin analytics */}
-            <Box
-              sx={{
-                display: 'flex',
-                gap: 3,
-                mb: 4,
-                flexWrap: { xs: 'wrap', md: 'nowrap' },
-              }}
-            >
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+            <Box sx={statRowSx}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -241,7 +273,7 @@ const Dashboard = () => {
                 </Card>
               </Box>
 
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -254,7 +286,7 @@ const Dashboard = () => {
                 </Card>
               </Box>
 
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -279,7 +311,7 @@ const Dashboard = () => {
                 </Card>
               </Box>
 
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -295,7 +327,7 @@ const Dashboard = () => {
 
             {/* Student course progress */}
             <Box sx={{ mb: 4 }}>
-              <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2 }}>
+              <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2, textAlign: 'left' }}>
                 Student Course Progress
               </Typography>
               {instructorEnrollments.length === 0 ? (
@@ -353,7 +385,7 @@ const Dashboard = () => {
 
             {/* Recent quiz attempts */}
             <Box>
-              <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2 }}>
+              <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2, textAlign: 'left' }}>
                 Recent Quiz Attempts
               </Typography>
               {instructorAttempts.length === 0 ? (
@@ -390,16 +422,9 @@ const Dashboard = () => {
         ) : (
           <>
             {/* Top stats row: 4 cards, same width in a single line on desktop */}
-            <Box
-              sx={{
-                display: 'flex',
-                gap: 3,
-                mb: 4,
-                flexWrap: { xs: 'wrap', md: 'nowrap' },
-              }}
-            >
+            <Box sx={statRowSx}>
               {/* Avg Quiz Score Card */}
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -447,7 +472,7 @@ const Dashboard = () => {
               </Box>
 
               {/* Total Time Spent Card */}
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -458,29 +483,15 @@ const Dashboard = () => {
                         ? `${Math.round(stats.totalTimeSpent * 60)} min`
                         : `${Number(stats.totalTimeSpent).toFixed(1)} h`}
                     </Typography>
-                    <Typography variant="caption" sx={{ color: '#757575', mb: 1, display: 'block' }}>
-                      Quiz + adaptive practice (completed sessions)
+                    <Typography variant="caption" sx={{ color: '#757575', display: 'block' }}>
+                      Quiz + adaptive practice (completed sessions). See weekly activity in Learning streak →
                     </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                      {(rewardDash?.week_activity || []).map((day) => (
-                        <Box
-                          key={day.date}
-                          title={day.date}
-                          sx={{
-                            width: 22,
-                            height: 22,
-                            backgroundColor: day.active ? '#8b5cf6' : '#e0e0e0',
-                            borderRadius: 1,
-                          }}
-                        />
-                      ))}
-                    </Box>
                   </CardContent>
                 </Card>
               </Box>
 
               {/* Activity streak card */}
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -496,7 +507,7 @@ const Dashboard = () => {
                     <Typography variant="caption" sx={{ color: '#757575', mb: 1, display: 'block' }}>
                       Last 7 days activity
                     </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', justifyContent: 'flex-start' }}>
                       {(rewardDash?.week_activity || []).map((day) => (
                         <Box
                           key={`w-${day.date}`}
@@ -521,7 +532,7 @@ const Dashboard = () => {
               </Box>
 
               {/* Last Quiz Score Card */}
-              <Box sx={{ flex: 1, minWidth: 220 }}>
+              <Box sx={statSlotSx}>
                 <Card sx={statCardStyle}>
                   <CardContent>
                     <Typography sx={{ color: '#757575', fontSize: '0.875rem', mb: 1 }}>
@@ -538,14 +549,96 @@ const Dashboard = () => {
               </Box>
             </Box>
 
+            {isStudent && studentInsights.length > 0 && (
+              <Box sx={{ mb: 4 }}>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'flex-start',
+                    gap: 1.25,
+                    mb: 2,
+                    ...sectionHeaderBandSx,
+                  }}
+                >
+                  <InsightsIcon sx={{ color: '#7c3aed', fontSize: 28 }} />
+                  <Typography variant="h5" sx={{ fontWeight: 700, color: '#312e81', textAlign: 'left', letterSpacing: '-0.02em' }}>
+                    Your insights
+                  </Typography>
+                </Box>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 900 }}>
+                  Personalized from your enrollments, quiz attempts, assignment grades, adaptive topic data, practice
+                  sessions, and streaks — recomputed on each load and when you return to this tab.
+                </Typography>
+                <Grid container spacing={2.5}>
+                  {studentInsights.map((ins) => {
+                    const palette = insightVariantPalette(ins.variant);
+                    return (
+                      <Grid item xs={12} md={6} key={ins.id}>
+                        <Card
+                          sx={{
+                            height: '100%',
+                            borderRadius: 3,
+                            overflow: 'hidden',
+                            position: 'relative',
+                            border: `1px solid ${palette.border}`,
+                            background: palette.bg,
+                            boxShadow: palette.shadow,
+                            transition: 'transform 0.22s ease, box-shadow 0.22s ease',
+                            '&:hover': {
+                              transform: 'translateY(-3px)',
+                              boxShadow: '0 14px 36px rgba(76, 29, 149, 0.14)',
+                            },
+                            '&::before': {
+                              content: '""',
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: 5,
+                              background: palette.bar,
+                              borderRadius: '10px 0 0 10px',
+                            },
+                          }}
+                        >
+                          <CardContent sx={{ pl: 2.75, pr: 2, py: 2.25, position: 'relative' }}>
+                            <Box
+                              sx={{
+                                display: 'flex',
+                                alignItems: 'flex-start',
+                                justifyContent: 'space-between',
+                                gap: 1.5,
+                                mb: 1.25,
+                              }}
+                            >
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                                <AutoAwesome sx={{ fontSize: 20, color: palette.iconColor, flexShrink: 0 }} />
+                                <Typography variant="subtitle1" sx={{ fontWeight: 800, color: '#1e1b4b', lineHeight: 1.3 }}>
+                                  {ins.title}
+                                </Typography>
+                              </Box>
+                              <Chip size="small" label={palette.chip} sx={{ ...palette.chipSx, flexShrink: 0 }} />
+                            </Box>
+                            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.65, fontSize: '0.9rem' }}>
+                              {ins.body}
+                            </Typography>
+                          </CardContent>
+                        </Card>
+                      </Grid>
+                    );
+                  })}
+                </Grid>
+              </Box>
+            )}
+
             {/* Rewards & XP snapshot */}
             {isStudent && rewardDash && (
               <Box sx={{ mb: 4 }}>
-                <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2 }}>
+                <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 2, textAlign: 'left' }}>
                   Rewards & momentum
                 </Typography>
-                <Grid container spacing={3}>
-                  <Grid item xs={12} md={5}>
+                <Grid container spacing={3} alignItems="stretch">
+                  <Grid item xs={12} md={6} sx={{ display: 'flex', alignItems: 'stretch' }}>
                     <Card sx={statCardStyle}>
                       <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
@@ -572,9 +665,9 @@ const Dashboard = () => {
                       </CardContent>
                     </Card>
                   </Grid>
-                  <Grid item xs={12} md={7}>
-                    <Card sx={{ ...courseCardStyle, minHeight: 230 }}>
-                      <CardContent>
+                  <Grid item xs={12} md={6} sx={{ display: 'flex' }}>
+                    <Card sx={{ ...courseCardStyle, height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+                      <CardContent sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                         <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5 }}>
                           Top courses by XP
                         </Typography>
@@ -621,18 +714,13 @@ const Dashboard = () => {
             {/* My Courses Section */}
             {isStudent && (
               <Box>
-                <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 3 }}>
+                <Typography variant="h5" sx={{ fontWeight: 600, color: '#212121', mb: 3, textAlign: 'left' }}>
                   My Courses
                 </Typography>
                 <Grid container spacing={3}>
                   {enrollments.length === 0 ? (
                     <Grid item xs={12}>
-                      <Typography
-                        variant="body2"
-                        color="text.secondary"
-                        align="center"
-                        sx={{ py: 4 }}
-                      >
+                      <Typography variant="body2" color="text.secondary" sx={{ py: 3, textAlign: 'left' }}>
                         No enrolled courses yet
                       </Typography>
                     </Grid>

@@ -11,7 +11,13 @@ import {
   Box,
   CircularProgress,
 } from '@mui/material';
-import { School, CheckCircle } from '@mui/icons-material';
+import { CheckCircle, LibraryBooks } from '@mui/icons-material';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
@@ -39,18 +45,26 @@ const MyCourses = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Typography variant="h4" gutterBottom>
-        My Courses
-      </Typography>
-      <Grid container spacing={3} sx={{ mt: 2 }}>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <LibraryBooks color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            My courses
+          </Typography>
+        </Box>
+      <Grid container spacing={3} sx={{ mt: 1 }}>
         {enrollments.length === 0 ? (
           <Grid item xs={12}>
             <Typography variant="body1" align="center" color="text.secondary">
@@ -105,7 +119,8 @@ const MyCourses = () => {
           ))
         )}
       </Grid>
-    </Container>
+      </Container>
+    </Box>
   );
 };
 

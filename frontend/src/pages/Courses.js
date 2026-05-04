@@ -13,7 +13,13 @@ import {
   CircularProgress,
   Chip,
 } from '@mui/material';
-import { School, Person } from '@mui/icons-material';
+import { Person, School } from '@mui/icons-material';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
@@ -57,22 +63,30 @@ const Courses = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Typography variant="h4" gutterBottom>
-        Available Courses
-      </Typography>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <School color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            Course catalog
+          </Typography>
+        </Box>
       <TextField
         fullWidth
         label="Search courses"
         variant="outlined"
-        sx={{ mb: 3, mt: 2 }}
+        sx={{ mb: 3, mt: 1 }}
         value={searchTerm}
         onChange={(e) => setSearchTerm(e.target.value)}
       />
@@ -133,7 +147,8 @@ const Courses = () => {
           ))
         )}
       </Grid>
-    </Container>
+      </Container>
+    </Box>
   );
 };
 

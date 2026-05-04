@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="EduAgent">
+  <defs>
+    <linearGradient id="ea" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4c1d95"/>
+      <stop offset="55%" stop-color="#6d28d9"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#ea)"/>
+  <path fill="rgba(255,255,255,0.95)" d="M16 6L9 9.5v6c0 3.1 2.2 5.8 7 6.7 4.8-.9 7-3.6 7-6.7v-6L16 6z"/>
+  <path stroke="#4c1d95" stroke-width="1.4" stroke-linecap="round" fill="none" d="M13 17h6M16 14v6"/>
+  <circle cx="24" cy="8" r="3.2" fill="#fde68a"/>
+</svg>

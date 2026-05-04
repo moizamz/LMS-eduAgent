@@ -8,6 +8,12 @@ import {
   CircularProgress,
 } from '@mui/material';
 import { Notifications as NotificationsIcon } from '@mui/icons-material';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 import api from '../services/api';
 
 const Notifications = () => {
@@ -32,16 +38,16 @@ const Notifications = () => {
   };
 
   return (
-    <Box sx={{ backgroundColor: '#f5f5f5', minHeight: '100vh', py: 4 }}>
-      <Container maxWidth="lg">
-        <Box display="flex" alignItems="center" mb={3}>
-          <NotificationsIcon sx={{ mr: 2, color: '#8b5cf6', fontSize: 32 }} />
-          <Typography variant="h4" sx={{ color: '#212121', fontWeight: 700 }}>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <NotificationsIcon color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
             Notifications
           </Typography>
         </Box>
 
-        <Card sx={{ backgroundColor: '#ffffff', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)' }}>
+        <Card>
           <CardContent>
             {loading ? (
               <Box display="flex" justifyContent="center" p={3}>

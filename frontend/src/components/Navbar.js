@@ -1,20 +1,21 @@
 import React from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   AppBar,
   Toolbar,
-  Typography,
   Button,
   Box,
   Menu,
   MenuItem,
   IconButton,
 } from '@mui/material';
-import { AccountCircle, Dashboard, School, AdminPanelSettings } from '@mui/icons-material';
+import { AccountCircle } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
+import { APP_BAR_HEIGHT, appBarChromeStyles } from '../constants/layout';
+import EduAgentBrand from './EduAgentBrand';
 
 const Navbar = () => {
-  const { user, logout, isAuthenticated } = useAuth();
+  const { logout, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const [anchorEl, setAnchorEl] = React.useState(null);
 
@@ -32,74 +33,70 @@ const Navbar = () => {
     handleClose();
   };
 
+  const brandTarget = isAuthenticated ? '/dashboard' : '/login';
+
   return (
-    <AppBar position="static" sx={{ backgroundColor: '#8b5cf6' }}>
-      <Toolbar>
-        <Typography variant="h6" component={Link} to="/" sx={{ flexGrow: 1, textDecoration: 'none', color: 'inherit', fontWeight: 700 }}>
-          EduAgent
-        </Typography>
+    <AppBar
+      position="sticky"
+      elevation={0}
+      sx={{
+        height: APP_BAR_HEIGHT,
+        ...appBarChromeStyles,
+      }}
+    >
+      <Toolbar sx={{ minHeight: APP_BAR_HEIGHT, px: { xs: 2, sm: 3 }, gap: 2 }}>
+        <EduAgentBrand to={brandTarget} size="toolbar" inverse />
+        <Box sx={{ flexGrow: 1 }} />
         {isAuthenticated ? (
           <>
-            <Button color="inherit" component={Link} to="/dashboard" startIcon={<Dashboard />}>
-              Dashboard
-            </Button>
-            <Button color="inherit" component={Link} to="/courses" startIcon={<School />}>
-              Courses
-            </Button>
-            {user?.role === 'admin' && (
-              <Button color="inherit" component={Link} to="/admin" startIcon={<AdminPanelSettings />}>
-                Admin
-              </Button>
-            )}
-            {user?.role === 'instructor' && (
-              <Button color="inherit" component={Link} to="/instructor">
-                Instructor Panel
-              </Button>
-            )}
-            {user?.role === 'student' && (
-              <Button color="inherit" component={Link} to="/student">
-                My Courses
-              </Button>
-            )}
-            <Box sx={{ ml: 2 }}>
-              <IconButton
-                size="large"
-                aria-label="account menu"
-                aria-controls="menu-appbar"
-                aria-haspopup="true"
-                onClick={handleMenu}
-                color="inherit"
-              >
-                <AccountCircle />
-              </IconButton>
-              <Menu
-                id="menu-appbar"
-                anchorEl={anchorEl}
-                anchorOrigin={{
-                  vertical: 'top',
-                  horizontal: 'right',
+            <IconButton
+              size="large"
+              aria-label="account menu"
+              aria-controls="menu-appbar"
+              aria-haspopup="true"
+              onClick={handleMenu}
+              color="inherit"
+              sx={{
+                border: '1px solid rgba(255,255,255,0.35)',
+                bgcolor: 'rgba(255,255,255,0.08)',
+              }}
+            >
+              <AccountCircle />
+            </IconButton>
+            <Menu
+              id="menu-appbar"
+              anchorEl={anchorEl}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+              open={Boolean(anchorEl)}
+              onClose={handleClose}
+            >
+              <MenuItem
+                onClick={() => {
+                  navigate('/profile');
+                  handleClose();
                 }}
-                keepMounted
-                transformOrigin={{
-                  vertical: 'top',
-                  horizontal: 'right',
-                }}
-                open={Boolean(anchorEl)}
-                onClose={handleClose}
               >
-                <MenuItem onClick={() => { navigate('/profile'); handleClose(); }}>
-                  Profile
-                </MenuItem>
-                <MenuItem onClick={handleLogout}>Logout</MenuItem>
-              </Menu>
-            </Box>
+                Profile
+              </MenuItem>
+              <MenuItem onClick={handleLogout}>Logout</MenuItem>
+            </Menu>
           </>
         ) : (
           <>
-            <Button color="inherit" component={Link} to="/login">
+            <Button color="inherit" onClick={() => navigate('/login')} sx={{ fontWeight: 600 }}>
               Login
             </Button>
-            <Button color="inherit" component={Link} to="/register">
+            <Button
+              variant="outlined"
+              color="inherit"
+              onClick={() => navigate('/register')}
+              sx={{
+                fontWeight: 600,
+                borderColor: 'rgba(255,255,255,0.55)',
+                '&:hover': { borderColor: '#fff', bgcolor: 'rgba(255,255,255,0.08)' },
+              }}
+            >
               Register
             </Button>
           </>
@@ -110,4 +107,3 @@ const Navbar = () => {
 };
 
 export default Navbar;
-

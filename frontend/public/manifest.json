@@ -1,0 +1,16 @@
+{
+  "short_name": "EduAgent",
+  "name": "EduAgent — Learning, amplified",
+  "icons": [
+    {
+      "src": "/eduagent-logo.png",
+      "type": "image/png",
+      "sizes": "280x280",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#5b21b6",
+  "background_color": "#fafafa"
+}

@@ -140,40 +140,17 @@ const Register = () => {
           }}
         >
           {/* Header */}
-          <Box sx={{ mb: 4, textAlign: 'center' }}>
-            <Typography
-              variant="h4"
-              component="h1"
-              sx={{
-                fontWeight: 700,
-                color: '#212121',
-                mb: 0.5,
-              }}
-            >
-              EduAgent
-            </Typography>
-            <Typography
-              variant="caption"
-              sx={{
-                color: '#757575',
-                fontSize: '0.75rem',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-              }}
-            >
-              Learning Management System
-            </Typography>
+          <Box sx={{ mb: 4, textAlign: 'left' }}>
             <Typography
               variant="h5"
               component="h2"
               sx={{
                 fontWeight: 600,
                 color: '#212121',
-                mt: 3,
                 mb: 1,
               }}
             >
-              Create Your Account
+              Create your account
             </Typography>
             <Typography variant="body2" sx={{ color: '#757575' }}>
               Join our learning community and start your educational journey

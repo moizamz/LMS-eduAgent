@@ -754,17 +754,25 @@ def adaptive_practice_start(request):
     except (TypeError, ValueError):
         warmup_questions = -1
 
+    raw_seq = request.data.get('sequential_generation')
+    # Default True: one MCQ at a time; each "next" generates the following item from fresh learner context.
+    sequential_generation = True if raw_seq is None else bool(raw_seq)
+
     if not course_id:
         return Response({'error': 'course_id is required'}, status=status.HTTP_400_BAD_REQUEST)
     if not subsection_ids:
         return Response({'error': 'subsection_ids is required'}, status=status.HTTP_400_BAD_REQUEST)
 
     num_questions = max(1, min(30, num_questions))
-    bank_multiplier = max(1, min(5, bank_multiplier))
-    if warmup_questions < 0:
-        warmup_questions = min(5, num_questions)
-    warmup_questions = max(0, min(num_questions, warmup_questions))
-    bank_size = min(45, max(num_questions * bank_multiplier, num_questions + 3))
+    if sequential_generation:
+        bank_size = 1
+        warmup_questions = 0
+    else:
+        bank_multiplier = max(1, min(5, bank_multiplier))
+        if warmup_questions < 0:
+            warmup_questions = min(5, num_questions)
+        warmup_questions = max(0, min(num_questions, warmup_questions))
+        bank_size = min(45, max(num_questions * bank_multiplier, num_questions + 3))
 
     try:
         course = Course.objects.get(id=course_id)
@@ -905,25 +913,27 @@ def adaptive_practice_start(request):
                 return Response({'error': 'Could not resolve selected question in bank'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         display_q = shuffle_mcq_for_display(first_q, random.Random())
 
-        session_payload = sanitize_for_db_json(
-            {
-                'mode': 'adaptive',
-                'bank': bank,
-                'used_bids': sorted(used),
-                'quality_report': quality_report,
-                'chunk_catalog_ids': chunk_catalog_ids,
-                'theta_trace': [float(astate.get('theta', 0.0))],
-                'adaptive': {
-                    'last_state': s0,
-                    'last_arm': arm,
-                    'pending_bid': bid,
-                    'answered': 0,
-                    'session_correct': 0,
-                    'log': [],
-                    'warmup_order': warmup_order,
-                },
-            }
-        )
+        _session_core = {
+            'mode': 'adaptive',
+            'sequential_llm': sequential_generation,
+            'bank': bank,
+            'used_bids': sorted(used),
+            'quality_report': quality_report,
+            'chunk_catalog_ids': chunk_catalog_ids,
+            'theta_trace': [float(astate.get('theta', 0.0))],
+            'adaptive': {
+                'last_state': s0,
+                'last_arm': arm,
+                'pending_bid': bid,
+                'answered': 0,
+                'session_correct': 0,
+                'log': [],
+                'warmup_order': warmup_order,
+            },
+        }
+        if sequential_generation:
+            _session_core['lecture_contents'] = sanitize_for_db_json(lecture_contents)
+        session_payload = sanitize_for_db_json(_session_core)
 
         try:
             session = PracticeSession.objects.create(
@@ -945,6 +955,7 @@ def adaptive_practice_start(request):
                 'session_id': session.id,
                 'total_questions': num_questions,
                 'bank_size': len(bank),
+                'sequential_generation': sequential_generation,
                 'warmup_questions': len(warmup_order),
                 'selection_first': 'warmup' if warmup_order else 'policy',
                 'question': display_q,
@@ -1093,6 +1104,81 @@ def adaptive_practice_step(request, pk):
             'session_correct': session_correct_next,
             'theta': float(astate.get('theta', 0.0)),
             'theta_delta_session': round(float(astate.get('theta', 0.0)) - theta_session_start, 4),
+        })
+
+    if data.get('sequential_llm'):
+        from quizzes.llm_service import generate_adaptive_question_bank
+        from quizzes.adaptive_practice import normalize_question as _normalize_q
+
+        lecture_contents = data.get('lecture_contents') or []
+        if not lecture_contents:
+            data['adaptive'] = ad
+            session.data = data
+            session.save(update_fields=['data'])
+            return Response(
+                {
+                    'error': 'Session missing lecture sources for adaptive generation',
+                    'done': True,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        pol_live = StudentAdaptivePolicyState.objects.filter(student=request.user, course=session.course).first()
+        astate_live = merge_ability_state(getattr(pol_live, 'ability_state', None) if pol_live else None)
+        prior_live = _adaptive_prior_session_digest(request.user, session.course)
+        learner_ctx = _learner_context_for_bank_prompt(astate_live, prior_live)
+
+        try:
+            pack_next = generate_adaptive_question_bank(
+                lecture_contents,
+                bank_size=1,
+                learner_context=learner_ctx or None,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                '[AdaptiveStep] sequential LLM generation failed session=%s', session.id
+            )
+            return Response(
+                {'error': 'Failed to generate the next question. Try again in a moment.', 'done': False},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        raw_next = pack_next.get('questions') or []
+        if not raw_next:
+            return Response(
+                {'error': 'Model returned no next question', 'done': True},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        bank_list = list(data.get('bank') or [])
+        new_bid = len(bank_list)
+        nq_norm = _normalize_q(raw_next[0], new_bid)
+        bank_list.append(nq_norm)
+        data['bank'] = bank_list
+        used_set = set(int(x) for x in (data.get('used_bids') or []))
+        used_set.add(new_bid)
+        data['used_bids'] = sorted(used_set)
+        next_arm = arm_index(str(nq_norm.get('difficulty', 'medium')), str(nq_norm.get('taxonomy', 'understand')))
+        ad['last_state'] = s_next
+        ad['last_arm'] = next_arm
+        ad['pending_bid'] = new_bid
+        data['adaptive'] = ad
+        cc_acc = list(data.get('chunk_catalog_ids') or [])
+        for cid in pack_next.get('chunk_catalog_ids') or []:
+            if cid not in cc_acc:
+                cc_acc.append(cid)
+        data['chunk_catalog_ids'] = cc_acc[:200]
+        session.data = sanitize_for_db_json(data)
+        session.save(update_fields=['data'])
+        display_next = shuffle_mcq_for_display(nq_norm, random.Random())
+        return Response({
+            'done': False,
+            'step': answered_next + 1,
+            'total_questions': session.num_questions,
+            'question': display_next,
+            'session_correct': session_correct_next,
+            'theta': float(astate.get('theta', 0.0)),
+            'selection': 'sequential_llm',
         })
 
     used = set(int(x) for x in (data.get('used_bids') or []))

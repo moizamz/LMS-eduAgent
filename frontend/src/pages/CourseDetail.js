@@ -42,7 +42,7 @@ import {
   TableContainer,
 } from '@mui/material';
 import {
-  PlayArrow, Description, Link as LinkIcon, TextFields,
+  Description,
   Add, Delete, UploadFile, Folder, InsertDriveFile, GetApp, AutoAwesome, Edit, Lightbulb, FileDownload, FileUpload,
   PictureAsPdf,
   EmojiEvents,
@@ -54,6 +54,12 @@ import { useAuth } from '../contexts/AuthContext';
 import EngagementLoadingOverlay from '../components/EngagementLoadingOverlay';
 import CourseGamificationProgressTab from '../components/CourseGamificationProgressTab';
 import { LLM_WAIT_MESSAGES, PRACTICE_WAIT_MESSAGES, CHAT_WAIT_MESSAGES } from '../constants/loadingEngagement';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  sectionHeaderBandSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 
 const CourseDetail = () => {
   const { id } = useParams();
@@ -141,7 +147,6 @@ const CourseDetail = () => {
   // Practice tab (student)
   const [practiceSelectedLectureIds, setPracticeSelectedLectureIds] = useState([]);
   const [practiceNumQuestions, setPracticeNumQuestions] = useState(5);
-  const [practiceWarmupQuestions, setPracticeWarmupQuestions] = useState(5);
   const [practiceLoading, setPracticeLoading] = useState(false);
   const [practiceQuestions, setPracticeQuestions] = useState([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
@@ -155,6 +160,7 @@ const CourseDetail = () => {
   const [practiceStepTotal, setPracticeStepTotal] = useState(5);
   const [practiceShownAtMs, setPracticeShownAtMs] = useState(null);
   const [practiceAnswerLog, setPracticeAnswerLog] = useState([]);
+  const [practiceNextLoading, setPracticeNextLoading] = useState(false);
 
   const [gamificationSummary, setGamificationSummary] = useState(null);
   const [engagementFeed, setEngagementFeed] = useState([]);
@@ -189,6 +195,7 @@ const CourseDetail = () => {
     fetchQuizzes();
     fetchAssignments();
     fetchChatSessions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload when route id changes; handlers intentionally stable via closure
   }, [id]);
 
   useEffect(() => {
@@ -672,6 +679,7 @@ const CourseDetail = () => {
     setPracticeStepDisplay(1);
     setPracticeStepTotal(practiceNumQuestions);
     setPracticeShownAtMs(null);
+    setPracticeNextLoading(false);
     try {
       const res = await api.post(
         '/quizzes/adaptive-practice/start/',
@@ -679,11 +687,7 @@ const CourseDetail = () => {
           course_id: id,
           subsection_ids: practiceSelectedLectureIds,
           num_questions: practiceNumQuestions,
-          bank_multiplier: 3,
-          warmup_questions: Math.min(
-            Math.max(0, practiceWarmupQuestions),
-            practiceNumQuestions
-          ),
+          sequential_generation: true,
         },
         { timeout: 360000 }
       );
@@ -699,13 +703,9 @@ const CourseDetail = () => {
       setPracticeStepTotal(res.data.total_questions || practiceNumQuestions);
       setPracticeStepDisplay(1);
       pushEngagement({
-        headline: 'Adaptive practice online',
-        body: `Question bank: ${res.data.bank_size ?? '—'} items · session: ${res.data.total_questions} questions${
-          res.data.warmup_questions
-            ? ` · first ${res.data.warmup_questions} from a spread sample, then policy-driven picks`
-            : ''
-        }.`,
-        sub: 'Later items use your answers + θ / topic model. Good luck!',
+        headline: 'Adaptive practice (one-by-one)',
+        body: `Session: ${res.data.total_questions} questions. After each answer, Next generates the following MCQ from your updated performance (θ, topics, prior rounds).`,
+        sub: 'Hybrid policy still updates from each response while the LLM targets weak areas.',
         flavor: 'practice',
       });
     } catch (e) {
@@ -1292,43 +1292,37 @@ const CourseDetail = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-        <CircularProgress />
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+            <CircularProgress />
+          </Box>
+        </Container>
       </Box>
     );
   }
 
   if (!course) {
     return (
-      <Container>
-        <Typography variant="h6">Course not found</Typography>
-      </Container>
+      <Box sx={workspacePageBackgroundSx}>
+        <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+          <Typography variant="h6">Course not found</Typography>
+        </Container>
+      </Box>
     );
   }
 
-  const getContentIcon = (contentType) => {
-    switch (contentType) {
-      case 'video':
-        return <PlayArrow />;
-      case 'pdf':
-        return <Description />;
-      case 'link':
-        return <LinkIcon />;
-      default:
-        return <TextFields />;
-    }
-  };
-
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Box sx={{ mb: 3 }}>
-        <Typography variant="h4" gutterBottom>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="lg" sx={workspaceContentContainerSx}>
+      <Box sx={{ ...sectionHeaderBandSx, mb: 3 }}>
+        <Typography variant="h5" component="h1" sx={{ ...pageHeadingTitleSx, mb: 1 }}>
           {course.title}
         </Typography>
-        <Typography variant="body1" color="text.secondary" paragraph>
+        <Typography variant="body1" color="text.secondary" sx={{ mb: 1.5 }}>
           {course.description}
         </Typography>
-        <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
+        <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap', mt: 1 }}>
           <Chip label={`Instructor: ${course.instructor?.first_name} ${course.instructor?.last_name}`} />
           {course.enrollment_count > 0 && (
             <Chip label={`${course.enrollment_count} students enrolled`} />
@@ -1456,7 +1450,7 @@ const CourseDetail = () => {
         </Card>
       )}
 
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
+      <Box sx={{ mb: 3 }}>
         <Tabs value={tabValue} onChange={(e, newValue) => setTabValue(newValue)}>
           <Tab label="Modules" />
           <Tab label="Assignments" />
@@ -2588,9 +2582,13 @@ const CourseDetail = () => {
       {tabValue === 5 && (
         <Card sx={{ position: 'relative', overflow: 'hidden' }}>
           <EngagementLoadingOverlay
-            active={practiceLoading}
+            active={practiceLoading || practiceNextLoading}
             messages={PRACTICE_WAIT_MESSAGES}
-            subtitle="Building your adaptive bank (Groq → Gemini → local) — usually a few seconds on Groq."
+            subtitle={
+              practiceNextLoading
+                ? 'Generating your next adaptive MCQ from your latest performance (Groq → Gemini → local)…'
+                : 'Building your first question from the selected PDFs (Groq → Gemini → local)…'
+            }
           />
           <CardContent>
             <Typography variant="h6" gutterBottom>Practice</Typography>
@@ -2599,9 +2597,10 @@ const CourseDetail = () => {
             ) : (
               <>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  Select lecture PDFs to build a question bank. Each session serves items chosen by a hybrid policy
-                  (tabular Q-learning + UCB bandits + linear TD head) using difficulty, Bloom taxonomy, your accuracy
-                  so far, and time spent on the previous question. Prior sessions update personalization for this course.
+                  Select lecture PDFs, then work through one MCQ at a time. After you check an answer, press{' '}
+                  <strong>Next</strong> to generate the following question: each new item uses your latest accuracy, time
+                  on the previous item, θ / topic history, and prior adaptive sessions so the model can target weak areas.
+                  A hybrid policy (Q-learning + UCB + linear TD) still learns from every step.
                 </Typography>
 
                 <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', mb: 2 }}>
@@ -2638,28 +2637,10 @@ const CourseDetail = () => {
                     onChange={(e) => {
                       const v = Math.max(1, Math.min(30, Number(e.target.value) || 5));
                       setPracticeNumQuestions(v);
-                      setPracticeWarmupQuestions((w) => Math.min(Math.max(0, w), v, 20));
                     }}
                   />
-                  <TextField
-                    label="Warmup first"
-                    type="number"
-                    size="small"
-                    sx={{ width: 130 }}
-                    helperText="Random spread, then adaptive"
-                    value={practiceWarmupQuestions}
-                    onChange={(e) =>
-                      setPracticeWarmupQuestions(
-                        Math.min(
-                          practiceNumQuestions,
-                          Math.max(0, Math.min(20, Number(e.target.value) || 0))
-                        )
-                      )
-                    }
-                  />
-
-                  <Button variant="contained" startIcon={<AutoAwesome />} disabled={practiceLoading} onClick={handleGeneratePractice}>
-                    {practiceLoading ? 'Building bank…' : 'Start adaptive practice'}
+                  <Button variant="contained" startIcon={<AutoAwesome />} disabled={practiceLoading || practiceNextLoading} onClick={handleGeneratePractice}>
+                    {practiceLoading ? 'Starting…' : 'Start adaptive practice'}
                   </Button>
                 </Box>
 
@@ -2749,18 +2730,21 @@ const CourseDetail = () => {
                       ) : (
                         <Button
                           variant="contained"
+                          disabled={practiceNextLoading}
                           onClick={async () => {
                             if (practiceSessionId) {
                               const elapsedSec =
                                 practiceShownAtMs != null ? (Date.now() - practiceShownAtMs) / 1000 : 0;
                               const isCor = !!practiceWasCorrect;
+                              setPracticeNextLoading(true);
                               try {
                                 const res = await api.post(
                                   `/quizzes/adaptive-practice/session/${practiceSessionId}/step/`,
                                   {
                                     is_correct: isCor,
                                     time_seconds: elapsedSec,
-                                  }
+                                  },
+                                  { timeout: 360000 }
                                 );
                                 const nextLog = [...practiceAnswerLog, { is_correct: isCor, time_seconds: elapsedSec }];
                                 setPracticeAnswerLog(nextLog);
@@ -2828,6 +2812,8 @@ const CourseDetail = () => {
                               } catch (e) {
                                 console.error('[Practice] step', e);
                                 toast.error(e?.response?.data?.error || e?.message || 'Failed to fetch next question');
+                              } finally {
+                                setPracticeNextLoading(false);
                               }
                               return;
                             }
@@ -3213,7 +3199,7 @@ const CourseDetail = () => {
               </Box>
               <Divider sx={{ my: 2 }} />
               {!editingQuiz && (
-                <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
+                <Box sx={{ mb: 2 }}>
                   <Tabs value={createQuizTab} onChange={(e, v) => setCreateQuizTab(v)}>
                     <Tab label="Create manually" />
                     <Tab label="Generate from lecture" />
@@ -3608,7 +3594,8 @@ const CourseDetail = () => {
           <Button onClick={() => setClassroomDialogOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
-    </Container>
+      </Container>
+    </Box>
   );
 };
 

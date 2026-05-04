@@ -10,6 +10,13 @@ import {
   Grid,
   Alert,
 } from '@mui/material';
+import { Person as PersonIcon } from '@mui/icons-material';
+import {
+  workspacePageBackgroundSx,
+  workspaceContentContainerSx,
+  workspacePageHeadingRowSx,
+  pageHeadingTitleSx,
+} from '../theme/eduAgentSurfaces';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../services/api';
 import { toast } from 'react-toastify';
@@ -64,11 +71,15 @@ const Profile = () => {
   };
 
   return (
-    <Container maxWidth="md" sx={{ mt: 4, mb: 4 }}>
-      <Typography variant="h4" gutterBottom>
-        Profile
-      </Typography>
-      <Paper elevation={3} sx={{ p: 4 }}>
+    <Box sx={workspacePageBackgroundSx}>
+      <Container maxWidth="md" sx={workspaceContentContainerSx}>
+        <Box sx={workspacePageHeadingRowSx}>
+          <PersonIcon color="primary" sx={{ fontSize: 32 }} />
+          <Typography variant="h5" component="h1" sx={pageHeadingTitleSx}>
+            Profile
+          </Typography>
+        </Box>
+      <Paper elevation={3} sx={{ p: 4, borderRadius: 3 }}>
         <Box sx={{ display: 'flex', justifyContent: 'center', mb: 3 }}>
           <Avatar sx={{ width: 100, height: 100 }}>
             {user?.first_name?.[0] || user?.username?.[0] || 'U'}
@@ -163,7 +174,8 @@ const Profile = () => {
           </Button>
         </form>
       </Paper>
-    </Container>
+      </Container>
+    </Box>
   );
 };
 
